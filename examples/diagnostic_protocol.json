@@ -1,0 +1,7 @@
+{
+  "device": "cuda",
+  "batch_size": 8,
+  "probes": 8,
+  "probe_seed": 20260719,
+  "time_index": -1
+}

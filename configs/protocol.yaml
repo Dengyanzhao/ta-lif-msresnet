@@ -1,0 +1,226 @@
+protocol_version: 1
+
+# Fixed complete-block seeds.  Every C1-C4 block uses the same data order and
+# convolution initialization seed.
+seeds: [11, 22, 33, 44, 55]
+output_root: results/runs
+
+# Author-approved frozen protocol. Full training remains blocked until the
+# Phase A commit, fresh Phase B matrix/manifest, and full preflight are complete.
+protocol_status:
+  frozen: true
+  confirmed_by: "Yanzhao Deng; Peng Yan; Song Wang"
+  confirmed_at: "2026-07-23T17:09:00+08:00"  # Use a quoted ISO-8601 string, e.g. "2026-07-19T20:00:00+08:00".
+  notes: >-
+    Reconstructed reference implementation; not the original dissertation code.
+    The two-group, 40-run scope was selected on 2026-07-22 before protocol
+    freeze and before access to any confirmatory outcomes.
+  confirmations:
+    reference_implementation_reviewed: true
+    neuron_parameters: true
+    static_augmentation_package: true
+    optimizer_and_schedule: true
+    cifar10dvs_preprocessing_and_split: true
+    outcome_thresholds_and_margins: true
+
+data:
+  root: data
+  val_fraction: 0.1
+  split_seed: 2024
+  split_manifest: data/manifests/{dataset}_seed{split_seed}.json
+  normalize: true
+  # Frozen order when enabled: crop -> flip -> optional AutoAugment -> tensor -> normalize.
+  augment: true
+  autoaugment: false
+  download: true
+  num_workers: 0
+  pin_memory: true
+
+datasets:
+  cifar10:
+    dataset: cifar10
+    root: data/cifar10
+    num_classes: 10
+    in_channels: 3
+  cifar100:
+    dataset: cifar100
+    root: data/cifar100
+    num_classes: 100
+    in_channels: 3
+  cifar10dvs:
+    dataset: cifar10dvs
+    root: data/cifar10dvs
+    # ToFrame values are raw polarity-separated event counts; no CIFAR image normalization.
+    normalize: false
+    # The folder contains one index.csv with disjoint trainval/test rows.
+    frames_path: data/cifar10dvs/processed
+    test_frames_path: data/cifar10dvs/processed
+    num_classes: 10
+    in_channels: 2
+    dvs_time_bins: 10
+    # Provisional values; conversion refuses to infer them silently.
+    dvs_height: 48
+    dvs_width: 48
+    dvs_resize_mode: nearest
+    dvs_test_fraction: 0.2
+    dvs_split_seed: 2024
+    # 0.125 of the 80% trainval pool gives an overall 70/10/20 split.
+    val_fraction: 0.125
+
+conditions:
+  C1:
+    topology: spiking_resnet
+    neuron: lif
+  C2:
+    topology: spiking_resnet
+    neuron: ta_lif
+  C3:
+    topology: ms_resnet
+    neuron: lif
+  C4:
+    topology: ms_resnet
+    neuron: ta_lif
+
+model:
+  base_channels: 16
+  neuron_cfg:
+    # Provisional decay coefficient. Confirm before setting protocol_status.frozen=true.
+    tau: 0.5
+    threshold: 1.0
+    v_rest: 0.0
+    v_reset: 0.0
+    width: 1.0
+    delta_min: 0.05
+
+optimizer:
+  epochs: 240
+  # Pre-freeze CUDA smoke found batch_size 256 and 128 OOM on the recorded
+  # 8 GB RTX 4070 Laptop; 64 passed all tested C2/C4 shapes. Authors must
+  # explicitly confirm this effective-batch change before freezing.
+  batch_size: 64
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [150, 180, 210]
+  gamma: 0.1
+  ta_start_fraction: 0.05
+  ta_lr_scale: 0.1
+  ta_weight_decay: 0.0
+  grad_clip: null
+  # Strong augmentation is explicitly off in this provisional protocol.
+  label_smoothing: 0.0
+  cutmix_alpha: 0.0
+  cutmix_probability: 0.0
+
+runtime:
+  device: auto
+  checkpoint_every: 1
+  log_every: 100
+  amp: false
+  deterministic: true
+  dry_run: false
+  limit_batches: null
+  resume: null
+
+experiments:
+  E1: primary factorial benchmark
+  E2: blocked-seed statistical analysis of E1 outputs
+  E3: diagnostics collected during E1 runs
+
+analysis:
+  # Expensive layer diagnostics are run from frozen checkpoints, not every train batch.
+  collect_activity: false
+  accuracy_scale: proportion
+  validation_accuracy_thresholds:
+    cifar10: 0.70
+    cifar100: 0.60
+    cifar10dvs: 0.60
+  convergence_epoch_rule: first_validation_epoch_at_or_above_threshold
+  nonconvergence_rule: not_reached_by_final_epoch
+  failure_rule: Non-finite loss, no valid best checkpoint, or unsuccessful process exit.
+  alpha: 0.05
+  confidence_level: 0.95
+  interaction_practical_threshold_pp: 0.50
+  primary_interaction_test:
+    estimand: seed_level_difference_in_differences_pp
+    blocking_factor: seed
+    test_statistic: one_sample_t_over_seed_level_did
+    null_hypothesis: delta_le_interaction_practical_threshold
+    alternative_hypothesis: delta_gt_interaction_practical_threshold
+    sidedness: one_sided_greater
+    estimation_interval: two_sided_95_percent_t
+  multiplicity_correction: holm_two_confirmatory_tests
+  multiplicity_family: two_confirmatory_interaction_tests
+  bootstrap:
+    resamples: 10000
+    seed: 20260719
+    role: sensitivity_only
+    resampling_unit: complete_seed_block
+    cellwise_resampling: forbidden
+    interval: two_sided_95_percent_percentile
+  # These margins are descriptive reference bands, not confirmatory tests.
+  efficiency_assessment: descriptive
+  efficiency_confidence_level: 0.95
+  efficiency_noninferiority_margins:
+    latency_b1_percent: 10.0
+    latency_b128_percent: 10.0
+    peak_memory_percent: 5.0
+    modeled_energy_percent: 10.0
+  efficiency_comparison:
+    contrasts: [C2_over_C1, C4_over_C3]
+    pairing_unit: same_seed_within_topology_and_time_steps
+    effect_scale: natural_log_ratio
+    summary: geometric_percent_overhead
+    confidence_interval: paired_two_sided_95_percent_t_on_log_ratio
+    training_environment_rule: homogeneous_hardware_software_device_and_precision
+    mixed_training_environment: analysis_blocked
+    status_rules:
+      point_estimate_gt_tolerance: exceeds_tolerance
+      point_estimate_le_tolerance_ci_upper_gt_tolerance: within_tolerance_uncertain
+      point_estimate_le_tolerance_ci_upper_le_tolerance: supported_within_tolerance
+      unavailable_or_invalid: not_assessed
+    overall_status_precedence: [exceeds_tolerance, within_tolerance_uncertain, not_assessed, supported_within_tolerance]
+  run_handling:
+    pilot_in_confirmatory_analysis: forbidden
+    pilot_scope: one_complete_c1_c4_seed_block_max_four_unique_runs
+    pilot_plan: repository_global_immutable_plan
+    pilot_output_root: separate_from_formal_results
+    failed_run_records: retain
+    seed_substitution: forbidden
+    outlier_exclusion: forbidden
+    nonconvergence_excludes_run: false
+    incomplete_confirmatory_block: unresolved_no_partial_analysis
+    protocol_change_after_first_confirmatory_run: forbidden
+  wording_gates:
+    synergy_precedence: true
+    complementary_and_composable_may_both_apply: true
+    synergistic: sesoi_shifted_one_sided_holm_reject
+    complementary: synergy_not_supported_and_c4_minus_c3_95ci_lower_gt_0_and_c4_minus_c2_95ci_lower_gt_0
+    composable_additive: interaction_90ci_within_plus_minus_0_50pp_and_c4_vs_c2_and_c3_one_sided_95ci_lower_gt_minus_0_50pp
+    inconclusive: no_applicable_gate_supported_or_incomplete_block
+  diagnostic_batches: 1
+  diagnostic_batch_size: 8
+  jacobian_probes: 8
+  jacobian_seed: 20260719
+  jacobian_time_index: -1
+
+benchmark:
+  device_type: cuda
+  precision: float32
+  batch_sizes: [1, 128]
+  warmup_iterations: 25
+  timed_iterations: 100
+  timing_method: synchronized_cuda_events
+  input_residency: preloaded_on_device_before_warmup_and_timing
+  # To model energy, change status before freeze and bind a sourced JSON file.
+  energy_model:
+    status: not_assessed
+    constants_path: null
+    constants_sha256: none
+    source: none
+
+matrix:
+  # These are the exact two confirmatory interaction groups.
+  primary:
+    - {experiment: E1, dataset: cifar100, depth: 20, time_steps: 6}
+    - {experiment: E1, dataset: cifar10dvs, depth: 20, time_steps: 10}
