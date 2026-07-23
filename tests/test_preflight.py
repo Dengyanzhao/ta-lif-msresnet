@@ -12,17 +12,26 @@ torch = pytest.importorskip("torch")
 
 from talif_msresnet.data import label_fingerprint, stratified_split_indices  # noqa: E402
 from talif_msresnet.preflight import (  # noqa: E402
+    FreezeGateError,
     _check_dvs_provenance,
     _stable_hash,
     check_protocol,
 )
+import talif_msresnet.preflight as preflight_module  # noqa: E402
 from talif_msresnet.utils import sha256_file  # noqa: E402
 
 
-def test_repository_protocol_is_intentionally_blocked_before_author_freeze() -> None:
+def test_repository_protocol_is_author_frozen_and_blocked_until_phase_b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
+
+    def reject_manifest(**_kwargs):
+        raise FreezeGateError("fixture: Phase B absent")
+
+    monkeypatch.setattr(preflight_module, "verify_formal_freeze", reject_manifest)
     report = check_protocol(
         root / "configs" / "protocol.yaml",
         mode="full",
@@ -30,24 +39,30 @@ def test_repository_protocol_is_intentionally_blocked_before_author_freeze() -> 
         check_dependencies=False,
     )
     assert not report.ok
-    assert any("protocol_status.frozen" in item for item in report.errors)
-    assert any("protocol_status.confirmations" in item for item in report.errors)
+    assert not any(item.startswith("protocol_status.") for item in report.errors)
     assert not any("interaction_practical_threshold_pp" in item for item in report.errors)
-    assert any("unsigned and unfrozen" in item for item in report.warnings)
+    assert not any("unsigned and unfrozen" in item for item in report.warnings)
+    assert any(
+        "Phase B freeze manifest verification failed: fixture: Phase B absent" in item
+        for item in report.errors
+    )
 
 
-def test_smoke_preflight_allows_unfrozen_protocol() -> None:
+def test_smoke_preflight_allows_unfrozen_protocol(
+    unfrozen_protocol_path: Path,
+) -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
     report = check_protocol(
-        root / "configs" / "protocol.yaml",
+        unfrozen_protocol_path,
         mode="smoke",
         project_root=root,
         check_dependencies=False,
     )
     assert report.ok
     assert any("unsigned and unfrozen" in item for item in report.warnings)
+    assert not any(item.startswith("protocol_status.") for item in report.errors)
 
 
 def _counts(labels, indices):

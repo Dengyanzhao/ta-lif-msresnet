@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 pytest.importorskip("torch")
 
@@ -44,7 +45,9 @@ def test_unfrozen_pilot_requires_a_separate_output_root() -> None:
 
 
 def test_pilot_plan_uses_portable_paths_and_trainer_revalidates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unfrozen_protocol_path: Path,
 ) -> None:
     config_dir = tmp_path / "external-configs"
     config_dir.mkdir()
@@ -81,13 +84,13 @@ def test_pilot_plan_uses_portable_paths_and_trainer_revalidates(
         all_rows=rows,
         selected_rows=rows[:1],
         config_dir=config_dir,
-        protocol_path=ROOT / "configs" / "protocol.yaml",
+        protocol_path=unfrozen_protocol_path,
         protocol_hash="protocol-hash",
         output_root=pilot_root,
         formal_root="results/runs",
     )
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    assert payload["protocol_path"] == "configs/protocol.yaml"
+    assert payload["protocol_path"].startswith("external:file-sha256:")
     assert payload["formal_output_root"] == "results/runs"
     assert payload["pilot_output_root"].startswith("external:path-sha256:")
     assert all(
@@ -105,10 +108,23 @@ def test_pilot_plan_uses_portable_paths_and_trainer_revalidates(
         plan_path,
         config=config,
         config_path=first_config,
-        protocol_path=ROOT / "configs" / "protocol.yaml",
+        protocol_path=unfrozen_protocol_path,
         protocol_hash="protocol-hash",
         output_dir_was_explicit=True,
     )
+
+    protocol = yaml.safe_load(unfrozen_protocol_path.read_text(encoding="utf-8"))
+    protocol["protocol_status"]["frozen"] = True
+    monkeypatch.setattr(trainer, "load_protocol", lambda _path: protocol)
+    with pytest.raises(ValueError, match="frozen protocol cannot use"):
+        trainer._validate_orchestrator_pilot_plan(
+            plan_path,
+            config=config,
+            config_path=first_config,
+            protocol_path=unfrozen_protocol_path,
+            protocol_hash="protocol-hash",
+            output_dir_was_explicit=True,
+        )
 
 
 def test_matrix_continuation_preserves_attempts_and_skips_complete(tmp_path: Path) -> None:

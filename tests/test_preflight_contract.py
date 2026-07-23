@@ -25,10 +25,22 @@ def test_pilot_mode_does_not_bypass_scientific_data_checks(tmp_path: Path) -> No
     assert any("CIFAR10-DVS" in error for error in report.errors)
 
 
-def test_full_mode_still_requires_author_freeze() -> None:
-    report = check_protocol(PROTOCOL, mode="full", project_root=ROOT, check_dependencies=False)
+def test_full_mode_still_requires_author_freeze(
+    unfrozen_protocol_path: Path,
+) -> None:
+    report = check_protocol(
+        unfrozen_protocol_path,
+        mode="full",
+        project_root=ROOT,
+        check_dependencies=False,
+    )
+    assert not report.ok
     assert any("protocol_status.frozen" in error for error in report.errors)
+    assert any("protocol_status.confirmed_by" in error for error in report.errors)
+    assert any("protocol_status.confirmed_at" in error for error in report.errors)
     assert any("protocol_status.confirmations" in error for error in report.errors)
+    assert any("unsigned and unfrozen" in warning for warning in report.warnings)
+    assert not any("Phase B freeze manifest" in error for error in report.errors)
 
 
 def test_full_mode_checks_phase_b_manifest_after_author_freeze(
