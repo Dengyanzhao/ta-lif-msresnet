@@ -10,6 +10,7 @@ import talif_msresnet.preflight as preflight_module
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = ROOT / "configs" / "protocol.yaml"
+V2R2_PROTOCOL = ROOT / "configs" / "protocol_v2r2_seed88_of80_e120.yaml"
 
 
 def test_pilot_mode_does_not_bypass_scientific_data_checks(tmp_path: Path) -> None:
@@ -34,6 +35,22 @@ def test_cifar100_only_v2_pilot_does_not_require_dvs_artifacts(tmp_path: Path) -
     )
 
     assert report.ok
+    assert any("unsigned and unfrozen" in warning for warning in report.warnings)
+    assert not any("CIFAR10-DVS" in error for error in report.errors)
+
+
+def test_cifar100_only_v2r2_seed88_pilot_passes_preflight(tmp_path: Path) -> None:
+    report = check_protocol(
+        V2R2_PROTOCOL,
+        mode="pilot",
+        project_root=tmp_path,
+        check_dependencies=False,
+    )
+    protocol = yaml.safe_load(V2R2_PROTOCOL.read_text(encoding="utf-8"))
+
+    assert report.ok
+    assert protocol["seeds"] == [88]
+    assert protocol["pilot_acceptance"]["overfit"]["steps"] == 80
     assert any("unsigned and unfrozen" in warning for warning in report.warnings)
     assert not any("CIFAR10-DVS" in error for error in report.errors)
 

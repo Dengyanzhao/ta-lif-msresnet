@@ -192,6 +192,73 @@ def test_v2_protocol_binds_health_thresholds_and_canonical_output() -> None:
         gate.validate_protocol_health_binding(args, config, protocol, output)
 
 
+def test_v2r2_protocol_requires_explicit_seed_and_overfit_step_bindings() -> None:
+    protocol_path = ROOT / "configs" / "protocol_v2r2_seed88_of80_e120.yaml"
+    protocol = gate.load_protocol(protocol_path)
+    acceptance = protocol["pilot_acceptance"]
+    assert acceptance["seed"] == 88
+    assert acceptance["overfit"]["steps"] == 80
+    assert acceptance["health_output"] == (
+        "results/pilot/v2r2_seed88_of80_e120_health.json"
+    )
+    assert acceptance["validation_output"] == (
+        "results/pilot/v2r2_seed88_of80_e120_validation.json"
+    )
+    assert acceptance["pilot_output_root"] == (
+        "results/pilot/v2r2_seed88_of80_e120"
+    )
+    assert acceptance["pilot_plan"] == (
+        "environment/unfrozen_pilot_plan_v2r2_seed88_of80_e120.json"
+    )
+    expected_runs = [
+        run
+        for run in gate.generate_run_matrix(protocol)
+        if run["condition"] == "C1" and run["seed"] == 88
+    ]
+    assert len(expected_runs) == 1
+    config = gate.validate_run_mapping(expected_runs[0], protocol)
+    output = ROOT / acceptance["health_output"]
+    config_path = (
+        ROOT
+        / "configs"
+        / "v2r2_seed88_of80_e120_generated"
+        / f"{config.runtime.run_id}.yaml"
+    )
+
+    explicit_args = gate.build_parser().parse_args(
+        [
+            "--config",
+            str(config_path),
+            "--protocol",
+            str(protocol_path),
+            "--output",
+            str(output),
+            "--seed",
+            "88",
+            "--overfit-steps",
+            "80",
+        ]
+    )
+    assert explicit_args.config == config_path
+    gate.validate_protocol_health_binding(
+        explicit_args, config, protocol, output
+    )
+
+    default_args = gate.build_parser().parse_args(
+        [
+            "--protocol",
+            str(protocol_path),
+            "--output",
+            str(output),
+        ]
+    )
+    assert (default_args.seed, default_args.overfit_steps) == (77, 40)
+    with pytest.raises(gate.HealthGateError, match="differ from protocol"):
+        gate.validate_protocol_health_binding(
+            default_args, config, protocol, output
+        )
+
+
 def test_read_only_health_report_validator_accepts_only_bound_pass(tmp_path: Path) -> None:
     protocol_path = ROOT / "configs" / "protocol_v2_pilot.yaml"
     protocol = gate.load_protocol(protocol_path)

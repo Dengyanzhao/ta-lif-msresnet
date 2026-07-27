@@ -22,6 +22,9 @@ from talif_msresnet.config import (  # noqa: E402
     V2_PILOT_ACCEPTANCE,
     V2_PILOT_PRIMARY_GROUPS,
     V2_PILOT_SEEDS,
+    V2R2_PILOT_ACCEPTANCE,
+    V2R2_PILOT_PRIMARY_GROUPS,
+    V2R2_PILOT_SEEDS,
     canonical_json,
     generate_run_matrix,
     load_protocol,
@@ -207,7 +210,7 @@ def test_scientific_hash_ignores_resume_path_but_not_seed(protocol):
     assert different_seed.config_hash != config.config_hash
 
 
-def test_v2_pilot_is_a_separate_nonreportable_complete_seed_block():
+def test_archived_v2r1_pilot_still_loads_as_its_exact_seed_block():
     protocol = load_protocol(ROOT / "configs" / "protocol_v2_pilot.yaml")
     runs = generate_run_matrix(protocol)
 
@@ -229,6 +232,36 @@ def test_v2_pilot_is_a_separate_nonreportable_complete_seed_block():
     ]
     assert {run["optimizer"]["epochs"] for run in runs} == {120}
     assert all(run["runtime"]["output_dir"] == "results/formal_v2" for run in runs)
+
+
+def test_v2r2_pilot_is_an_exact_isolated_nonreportable_seed_block():
+    protocol = load_protocol(
+        ROOT / "configs" / "protocol_v2r2_seed88_of80_e120.yaml"
+    )
+    runs = generate_run_matrix(protocol)
+
+    assert protocol["protocol_version"] == 2
+    assert protocol["study_stage"] == "pilot"
+    assert protocol["protocol_status"]["frozen"] is False
+    assert tuple(protocol["seeds"]) == V2R2_PILOT_SEEDS
+    assert protocol["pilot_acceptance"] == V2R2_PILOT_ACCEPTANCE
+    assert protocol["pilot_acceptance"]["identity"] == "v2r2_seed88_of80_e120"
+    assert protocol["pilot_acceptance"]["overfit"]["steps"] == 80
+    assert tuple(
+        (slot["experiment"], slot["dataset"], slot["depth"], slot["time_steps"])
+        for slot in protocol["matrix"]["primary"]
+    ) == V2R2_PILOT_PRIMARY_GROUPS
+    assert len(runs) == 4
+    assert [(run["seed"], run["condition"]) for run in runs] == [
+        (88, "C1"),
+        (88, "C2"),
+        (88, "C3"),
+        (88, "C4"),
+    ]
+    assert {run["optimizer"]["epochs"] for run in runs} == {120}
+    assert all(run["runtime"]["output_dir"] == "results/formal_v2r2" for run in runs)
+    assert set(protocol["seeds"]).isdisjoint(PRESPECIFIED_SEEDS)
+    assert set(protocol["seeds"]).isdisjoint(V2_PILOT_SEEDS)
 
 
 @pytest.mark.parametrize(
@@ -253,6 +286,47 @@ def test_v2_pilot_is_a_separate_nonreportable_complete_seed_block():
 )
 def test_v2_pilot_identity_cannot_drift(mutation, message):
     protocol = load_protocol(ROOT / "configs" / "protocol_v2_pilot.yaml")
+    mutation(protocol)
+    with pytest.raises(ConfigError, match=message):
+        validate_protocol(protocol)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda value: value.update({"seeds": [77]}), "seeds"),
+        (
+            lambda value: value.update({"output_root": "results/formal_v2"}),
+            "output_root",
+        ),
+        (
+            lambda value: value["matrix"]["primary"][0].update({"seeds": [77]}),
+            "top-level seeds",
+        ),
+        (
+            lambda value: value["pilot_acceptance"].update(
+                {"identity": "v2r3_seed88_of80_e120"}
+            ),
+            "pilot_acceptance",
+        ),
+        (
+            lambda value: value["pilot_acceptance"]["overfit"].update(
+                {"steps": 40}
+            ),
+            "pilot_acceptance",
+        ),
+        (
+            lambda value: value["pilot_acceptance"]["timing"].update(
+                {"maximum_ta_enabled_over_frozen_ratio": 4.0}
+            ),
+            "pilot_acceptance",
+        ),
+    ),
+)
+def test_v2r2_pilot_identity_cannot_drift(mutation, message):
+    protocol = load_protocol(
+        ROOT / "configs" / "protocol_v2r2_seed88_of80_e120.yaml"
+    )
     mutation(protocol)
     with pytest.raises(ConfigError, match=message):
         validate_protocol(protocol)

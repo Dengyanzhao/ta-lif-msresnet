@@ -267,7 +267,10 @@ def validate_protocol_health_binding(
     if config.analysis.get("protocol_hash") != protocol_hash:
         raise HealthGateError("Reference config protocol_hash differs from the pilot protocol")
     if config.runtime.seed != args.seed or config.model.condition != "C1":
-        raise HealthGateError("Reference config must be the seed-77 C1 pilot matrix cell")
+        raise HealthGateError(
+            "Reference config must be the C1 pilot matrix cell for "
+            f"pilot_acceptance seed {acceptance.get('seed')}"
+        )
     expected_output = _absolute_repository_path(str(acceptance.get("health_output", "")))
     if output.resolve() != expected_output:
         raise HealthGateError(

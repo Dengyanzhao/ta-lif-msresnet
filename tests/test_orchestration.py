@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+V2R1_PROTOCOL = ROOT / "configs" / "protocol_v2_pilot.yaml"
+V2R1_CONFIG_DIR = ROOT / "configs" / "v2_pilot_generated"
+V2R2_PROTOCOL = ROOT / "configs" / "protocol_v2r2_seed88_of80_e120.yaml"
+V2R2_CONFIG_DIR = ROOT / "configs" / "v2r2_seed88_of80_e120_generated"
+
 import evaluate_checkpoints as final_eval  # noqa: E402
 import run_matrix as matrix_runner  # noqa: E402
 import talif_msresnet.train as trainer  # noqa: E402
@@ -211,11 +216,11 @@ def test_v2_pilot_launch_contract_uses_only_protocol_bound_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    protocol_path = ROOT / "configs" / "protocol_v2_pilot.yaml"
+    protocol_path = V2R1_PROTOCOL
     protocol = load_protocol(protocol_path)
-    with (
-        ROOT / "configs" / "v2_pilot_generated" / "run_manifest.csv"
-    ).open("r", encoding="utf-8-sig", newline="") as handle:
+    with (V2R1_CONFIG_DIR / "run_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
         rows = list(csv.DictReader(handle))
     health_report = {
         "status": "PASS",
@@ -242,20 +247,18 @@ def test_v2_pilot_launch_contract_uses_only_protocol_bound_paths(
     assert health == (ROOT / acceptance["health_output"]).resolve()
     assert observed is health_report
     matrix_manifest = json.loads(
-        (
-            ROOT / "configs" / "v2_pilot_generated" / "matrix_manifest.json"
-        ).read_text(encoding="utf-8")
+        (V2R1_CONFIG_DIR / "matrix_manifest.json").read_text(encoding="utf-8")
     )
     matrix_runner._validate_v2_generated_matrix(
         protocol=protocol,
         protocol_path=protocol_path,
-        config_dir=ROOT / "configs" / "v2_pilot_generated",
+        config_dir=V2R1_CONFIG_DIR,
         manifest_rows=rows,
         matrix_manifest=matrix_manifest,
     )
 
     tampered_dir = tmp_path / "v2_pilot_generated"
-    shutil.copytree(ROOT / "configs" / "v2_pilot_generated", tampered_dir)
+    shutil.copytree(V2R1_CONFIG_DIR, tampered_dir)
     tampered_path = tampered_dir / rows[0]["config_file"]
     tampered = yaml.safe_load(tampered_path.read_text(encoding="utf-8"))
     tampered["runtime"]["log_every"] = 99
@@ -289,6 +292,101 @@ def test_v2_pilot_launch_contract_uses_only_protocol_bound_paths(
             output_root="results/pilot/changed",
             pilot_plan=None,
         )
+
+
+def test_v2r2_launch_contract_isolated_from_seed77_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = load_protocol(V2R2_PROTOCOL)
+    acceptance = protocol["pilot_acceptance"]
+    legacy_acceptance = load_protocol(V2R1_PROTOCOL)["pilot_acceptance"]
+    with (V2R2_CONFIG_DIR / "run_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+
+    observed_health_calls: list[tuple[Path, Path]] = []
+    health_report = {
+        "status": "PASS",
+        "acceptance_hash": "v2r2-acceptance-hash",
+        "git_commit": "b" * 40,
+    }
+
+    def validate_bound_health(
+        health_path: Path,
+        protocol_path: Path,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        observed_health_calls.append((health_path.resolve(), protocol_path.resolve()))
+        return health_report
+
+    monkeypatch.setattr(
+        matrix_runner,
+        "validate_pilot_health_report",
+        validate_bound_health,
+    )
+
+    output, plan, health, observed = matrix_runner._validate_v2_pilot_launch_contract(
+        protocol=protocol,
+        protocol_path=V2R2_PROTOCOL,
+        selected_rows=rows,
+        output_root=None,
+        pilot_plan=None,
+    )
+
+    assert [int(row["seed"]) for row in rows] == [88, 88, 88, 88]
+    assert acceptance["overfit"]["steps"] == 80
+    assert output == (ROOT / acceptance["pilot_output_root"]).resolve()
+    assert plan == (ROOT / acceptance["pilot_plan"]).resolve()
+    assert health == (ROOT / acceptance["health_output"]).resolve()
+    assert observed is health_report
+    assert observed_health_calls == [(health, V2R2_PROTOCOL.resolve())]
+    assert health != (ROOT / legacy_acceptance["health_output"]).resolve()
+
+    matrix_manifest = json.loads(
+        (V2R2_CONFIG_DIR / "matrix_manifest.json").read_text(encoding="utf-8")
+    )
+    matrix_runner._validate_v2_generated_matrix(
+        protocol=protocol,
+        protocol_path=V2R2_PROTOCOL,
+        config_dir=V2R2_CONFIG_DIR,
+        manifest_rows=rows,
+        matrix_manifest=matrix_manifest,
+    )
+
+    with pytest.raises(ValueError, match="output-root cannot override"):
+        matrix_runner._validate_v2_pilot_launch_contract(
+            protocol=protocol,
+            protocol_path=V2R2_PROTOCOL,
+            selected_rows=rows,
+            output_root=legacy_acceptance["pilot_output_root"],
+            pilot_plan=None,
+        )
+    with pytest.raises(ValueError, match="pilot-plan cannot override"):
+        matrix_runner._validate_v2_pilot_launch_contract(
+            protocol=protocol,
+            protocol_path=V2R2_PROTOCOL,
+            selected_rows=rows,
+            output_root=None,
+            pilot_plan=legacy_acceptance["pilot_plan"],
+        )
+
+    with (V2R1_CONFIG_DIR / "run_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        legacy_rows = list(csv.DictReader(handle))
+    legacy_manifest = json.loads(
+        (V2R1_CONFIG_DIR / "matrix_manifest.json").read_text(encoding="utf-8")
+    )
+    with pytest.raises(RuntimeError, match="differs from the protocol"):
+        matrix_runner._validate_v2_generated_matrix(
+            protocol=protocol,
+            protocol_path=V2R2_PROTOCOL,
+            config_dir=V2R1_CONFIG_DIR,
+            manifest_rows=legacy_rows,
+            matrix_manifest=legacy_manifest,
+        )
+
 
 def test_matrix_continuation_preserves_attempts_and_skips_complete(tmp_path: Path) -> None:
     assert matrix_runner._project_path("results/runs").is_absolute()

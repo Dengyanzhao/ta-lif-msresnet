@@ -5,8 +5,9 @@
 > performance incident were identified. Preserve its artifacts for audit only;
 > do not resume its checkpoints or combine them with repaired runs. See
 > `FORMAL_V1_INCIDENT.md`. Development now proceeds through the separate,
-> non-reportable `configs/protocol_v2_pilot.yaml` gate. No v2 formal protocol is
-> frozen yet.
+> non-reportable `configs/protocol_v2r2_seed88_of80_e120.yaml` gate. The failed
+> seed-77 v2r1 gate is retained for audit and must not be rerun. No v2 formal
+> protocol is frozen yet.
 
 Reference implementation and reproducibility package for the planned
 Knowledge-Based Systems experiment. It implements the controlled 2 x 2 cells:
@@ -205,13 +206,17 @@ are generated.
 not a source of formal 40-run configurations. Do not substitute it for the
 fresh `configs/generated` directory bound by the Phase B manifest.
 
-The only active non-reportable pilot is the fixed v2 seed-77 C1-C4 block in
-`configs/protocol_v2_pilot.yaml`. Follow `V2_PILOT_RUNBOOK.md`: first produce the
-canonical RTX 5090 health report, then launch the complete ordered quartet in
-one invocation. Partial condition selection, a fifth run, another seed/block,
-another output root, stale generated configs, or an unbound health report is
-rejected. A technical interruption may resume only on the same environment from
-that run's own `last.pt`; cross-environment resume is forbidden.
+The seed-77 v2r1 health gate is a retained failed engineering record and is no
+longer an active pilot identity. Its protocol, report, and benchmark evidence
+must not be overwritten or rerun. The only active non-reportable pilot is the
+fixed v2r2 seed-88 C1-C4 block in
+`configs/protocol_v2r2_seed88_of80_e120.yaml`. Follow
+`V2R2_PILOT_RUNBOOK.md`: first produce the bound RTX 5090 80-step health report,
+then launch the complete ordered quartet in one invocation. Partial condition
+selection, a fifth run, another seed/block, another output root, stale generated
+configs, or an unbound health report is rejected. A technical interruption may
+resume only on the same environment from that run's own `last.pt`;
+cross-environment resume is forbidden.
 
 ## Full validation-only training
 

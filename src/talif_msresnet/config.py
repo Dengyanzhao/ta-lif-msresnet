@@ -101,6 +101,79 @@ V2_PILOT_ACCEPTANCE: Dict[str, Any] = {
         "fallback_action": "fresh_protocol_and_fresh_runs_no_resume",
     },
 }
+V2R2_PILOT_SEEDS: Tuple[int, ...] = (88,)
+V2R2_PILOT_PRIMARY_GROUPS: Tuple[Tuple[str, str, int, int], ...] = (
+    ("E1", "cifar100", 20, 6),
+)
+V2R2_PILOT_ACCEPTANCE: Dict[str, Any] = {
+    "identity": "v2r2_seed88_of80_e120",
+    "artifact_class": "non_reportable_pilot",
+    "seed": 88,
+    "dataset": "cifar100",
+    "conditions": ["C1", "C2", "C3", "C4"],
+    "health_output": "results/pilot/v2r2_seed88_of80_e120_health.json",
+    "validation_output": "results/pilot/v2r2_seed88_of80_e120_validation.json",
+    "pilot_output_root": "results/pilot/v2r2_seed88_of80_e120",
+    "pilot_plan": (
+        "environment/unfrozen_pilot_plan_v2r2_seed88_of80_e120.json"
+    ),
+    "environment": {
+        "expected_gpu_substring": "RTX 5090",
+        "pytorch_version": "2.9.1+cu128",
+        "cuda_runtime": "12.8",
+        "precision": "float32",
+        "deterministic": True,
+    },
+    "overfit": {
+        "batch_size": 8,
+        "steps": 80,
+        "minimum_accuracy": 0.50,
+        "maximum_loss_fraction": 0.90,
+        "minimum_ta_routed_gradient_coverage": 0.90,
+    },
+    "timing": {
+        "batch_size": 64,
+        "warmup_steps": 2,
+        "timed_steps": 5,
+        "maximum_ta_enabled_over_frozen_ratio": 3.0,
+        "epoch_time_ratio_statistic": (
+            "median_enabled_train_seconds_over_median_frozen_train_seconds"
+        ),
+        "epoch_time_ratio_conditions": ["C2", "C4"],
+        "ta_state_source": "events_jsonl_epoch_completed_ta_enabled",
+    },
+    "schedule": {
+        "candidate_epochs": 120,
+        "required_best_validation_accuracy": 0.60,
+        "require_all_conditions_converged": True,
+        "technical_interruption_policy": (
+            "same_environment_last_checkpoint_resume_permitted"
+        ),
+        "cross_environment_resume": "forbidden",
+        "retained_failure_artifacts": (
+            "allowed_only_after_later_successful_same_run_completion"
+        ),
+        "fallback_epochs": 160,
+        "fallback_action": "fresh_protocol_and_fresh_runs_no_resume",
+    },
+}
+V2_PILOT_PROFILE_CONTRACTS: Tuple[
+    Tuple[Tuple[int, ...], Tuple[Tuple[str, str, int, int], ...], str, Dict[str, Any]],
+    ...,
+] = (
+    (
+        V2_PILOT_SEEDS,
+        V2_PILOT_PRIMARY_GROUPS,
+        "results/formal_v2",
+        V2_PILOT_ACCEPTANCE,
+    ),
+    (
+        V2R2_PILOT_SEEDS,
+        V2R2_PILOT_PRIMARY_GROUPS,
+        "results/formal_v2r2",
+        V2R2_PILOT_ACCEPTANCE,
+    ),
+)
 EXPECTED_RUN_COUNT = (
     len(PRESPECIFIED_PRIMARY_GROUPS) * len(SUPPORTED_CONDITIONS) * len(PRESPECIFIED_SEEDS)
 )
@@ -429,18 +502,27 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
         if "pilot_acceptance" in raw:
             raise ConfigError("protocol_version 1 must not define pilot_acceptance")
         expected_seeds = PRESPECIFIED_SEEDS
+        expected_groups = PRESPECIFIED_PRIMARY_GROUPS
+        expected_output_root = None
     else:
         _require_exact(study_stage, "pilot", "study_stage")
         acceptance = _check_mapping(
             raw.get("pilot_acceptance"), "protocol.pilot_acceptance"
         )
-        _check_keys(
-            acceptance, V2_PILOT_ACCEPTANCE, "protocol.pilot_acceptance"
+        allowed_acceptance_keys = set().union(
+            *(contract[3] for contract in V2_PILOT_PROFILE_CONTRACTS)
         )
-        _require_exact(
-            dict(acceptance), V2_PILOT_ACCEPTANCE, "protocol.pilot_acceptance"
-        )
-        expected_seeds = V2_PILOT_SEEDS
+        _check_keys(acceptance, allowed_acceptance_keys, "protocol.pilot_acceptance")
+        matching_profiles = [
+            contract
+            for contract in V2_PILOT_PROFILE_CONTRACTS
+            if dict(acceptance) == contract[3]
+        ]
+        if len(matching_profiles) != 1:
+            raise ConfigError(
+                "protocol.pilot_acceptance must exactly match one supported v2 pilot profile"
+            )
+        expected_seeds, expected_groups, expected_output_root, _ = matching_profiles[0]
     seeds_raw = raw.get("seeds", list(expected_seeds))
     if not isinstance(seeds_raw, Sequence) or isinstance(seeds_raw, (str, bytes)) or not seeds_raw:
         raise ConfigError("seeds must be a non-empty sequence")
@@ -451,6 +533,8 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     output_root = str(raw.get("output_root", "results"))
     if not output_root:
         raise ConfigError("output_root cannot be empty")
+    if expected_output_root is not None:
+        _require_exact(output_root, expected_output_root, "output_root")
 
     # Normalize the common sections while retaining dataset/matrix declarations.
     normalized: Dict[str, Any] = copy.deepcopy(dict(raw))
@@ -534,15 +618,12 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
                             f"protocol.matrix.{group}[{index}].seeds must be drawn from top-level seeds"
                         )
         primary = tuple(_matrix_group_tuple(slot) for slot in matrix.get("primary", ()))
-        expected_groups = (
-            PRESPECIFIED_PRIMARY_GROUPS if version == 1 else V2_PILOT_PRIMARY_GROUPS
-        )
         _require_exact(primary, expected_groups, "protocol.matrix.primary")
         if version == 2:
             slot = matrix["primary"][0]
             _require_exact(
                 tuple(slot.get("seeds", ())),
-                V2_PILOT_SEEDS,
+                expected_seeds,
                 "protocol.matrix.primary[0].seeds",
             )
     if "analysis" in raw:

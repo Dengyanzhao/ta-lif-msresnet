@@ -15,6 +15,11 @@ pytest.importorskip("torch")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+V2R1_PROTOCOL = ROOT / "configs" / "protocol_v2_pilot.yaml"
+V2R1_CONFIG_DIR_NAME = "v2_pilot_generated"
+V2R2_PROTOCOL = ROOT / "configs" / "protocol_v2r2_seed88_of80_e120.yaml"
+V2R2_CONFIG_DIR_NAME = "v2r2_seed88_of80_e120_generated"
+
 import generate_run_configs  # noqa: E402
 import validate_v2_pilot as validator  # noqa: E402
 from talif_msresnet.config import load_protocol, load_run_config  # noqa: E402
@@ -55,11 +60,14 @@ def _environment_identity() -> tuple[str, str]:
 def _pilot_tree(
     tmp_path: Path,
     *,
+    protocol_path: Path = V2R1_PROTOCOL,
+    config_dir_name: str = V2R1_CONFIG_DIR_NAME,
     best_accuracy_by_condition: dict[str, float] | None = None,
 ) -> tuple[Path, Path, Path]:
-    protocol_path = ROOT / "configs" / "protocol_v2_pilot.yaml"
     protocol = load_protocol(protocol_path)
-    config_dir = tmp_path / "configs" / "v2_pilot_generated"
+    acceptance = protocol["pilot_acceptance"]
+    pilot_seed = int(acceptance["seed"])
+    config_dir = tmp_path / "configs" / config_dir_name
     generate_run_configs.generate(protocol_path, config_dir)
     manifest = json.loads((config_dir / "matrix_manifest.json").read_text(encoding="utf-8"))
     results_root = tmp_path / protocol["pilot_acceptance"]["pilot_output_root"]
@@ -71,7 +79,6 @@ def _pilot_tree(
     split_hash = "b" * 64
     consolidated: list[dict[str, object]] = []
     matrix_events: list[str] = []
-    acceptance = protocol["pilot_acceptance"]
     health_path = tmp_path / acceptance["health_output"]
     health_path.parent.mkdir(parents=True, exist_ok=True)
     health_report = {
@@ -164,7 +171,7 @@ def _pilot_tree(
         metrics = {
             "run_id": run_id,
             "condition": condition,
-            "seed": 77,
+            "seed": pilot_seed,
             "dataset": "cifar100",
             "config_hash": row["config_hash"],
             "protocol_hash": manifest["protocol_hash"],
@@ -300,6 +307,92 @@ def test_complete_120_epoch_pilot_passes(tmp_path: Path) -> None:
     assert not report["threshold_failures"]
     assert report["runs"]["C2"]["timing"]["ratio"] == 2.0
     assert report["runs"]["C1"]["timing"]["status"] == "NOT_APPLICABLE_LIF"
+
+
+def test_v2r2_seed88_pilot_passes_with_its_bound_artifact_paths(
+    tmp_path: Path,
+) -> None:
+    protocol_path, configs, results = _pilot_tree(
+        tmp_path,
+        protocol_path=V2R2_PROTOCOL,
+        config_dir_name=V2R2_CONFIG_DIR_NAME,
+    )
+    protocol = load_protocol(protocol_path)
+    acceptance = protocol["pilot_acceptance"]
+
+    report = validator.validate_pilot(
+        protocol_path=protocol_path,
+        config_dir=configs,
+        results_root=results,
+        repository_root=tmp_path,
+        strict_health_validation=False,
+    )
+
+    assert acceptance["seed"] == 88
+    assert acceptance["overfit"]["steps"] == 80
+    assert configs.name == V2R2_CONFIG_DIR_NAME
+    assert report["status"] == "PASS"
+    assert report["protocol_path"] == str(V2R2_PROTOCOL.resolve())
+    assert report["results_root"] == str((tmp_path / acceptance["pilot_output_root"]).resolve())
+    assert report["health_report_path"] == str((tmp_path / acceptance["health_output"]).resolve())
+    assert report["pilot_plan_path"] == str((tmp_path / acceptance["pilot_plan"]).resolve())
+    assert {condition: run["run_id"] for condition, run in report["runs"].items()} == {
+        condition: f"E1_cifar100_d20_t6_{condition}_s88" for condition in ("C1", "C2", "C3", "C4")
+    }
+
+
+def test_v2r2_validator_rejects_seed77_output_root(tmp_path: Path) -> None:
+    _old_protocol, _old_configs, old_results = _pilot_tree(tmp_path)
+    new_protocol, new_configs, _new_results = _pilot_tree(
+        tmp_path,
+        protocol_path=V2R2_PROTOCOL,
+        config_dir_name=V2R2_CONFIG_DIR_NAME,
+    )
+
+    with pytest.raises(validator.PilotValidationError, match="Results root differs"):
+        validator.validate_pilot(
+            protocol_path=new_protocol,
+            config_dir=new_configs,
+            results_root=old_results,
+            repository_root=tmp_path,
+            strict_health_validation=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("acceptance_path_key", "failure_fragment"),
+    (
+        ("health_output", "pilot health report protocol_hash"),
+        ("pilot_plan", "pilot plan protocol_path differs"),
+    ),
+)
+def test_v2r2_validator_rejects_seed77_bound_evidence(
+    tmp_path: Path,
+    acceptance_path_key: str,
+    failure_fragment: str,
+) -> None:
+    old_protocol, _old_configs, _old_results = _pilot_tree(tmp_path)
+    new_protocol, new_configs, new_results = _pilot_tree(
+        tmp_path,
+        protocol_path=V2R2_PROTOCOL,
+        config_dir_name=V2R2_CONFIG_DIR_NAME,
+    )
+    old_acceptance = load_protocol(old_protocol)["pilot_acceptance"]
+    new_acceptance = load_protocol(new_protocol)["pilot_acceptance"]
+    old_artifact = tmp_path / old_acceptance[acceptance_path_key]
+    new_artifact = tmp_path / new_acceptance[acceptance_path_key]
+    new_artifact.write_bytes(old_artifact.read_bytes())
+
+    report = validator.validate_pilot(
+        protocol_path=new_protocol,
+        config_dir=new_configs,
+        results_root=new_results,
+        repository_root=tmp_path,
+        strict_health_validation=False,
+    )
+
+    assert report["status"] == "INVALID"
+    assert any(failure_fragment in failure for failure in report["integrity_failures"])
 
 
 def test_accuracy_failure_requires_fresh_160_epoch_protocol(tmp_path: Path) -> None:
