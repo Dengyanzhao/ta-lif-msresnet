@@ -11,14 +11,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from talif_msresnet.config import load_protocol, load_run_config  # noqa: E402
+from talif_msresnet.config import (  # noqa: E402
+    generate_run_matrix,
+    load_protocol,
+    load_run_config,
+    validate_run_mapping,
+)
 from talif_msresnet.freeze import FreezeGateError, verify_formal_freeze  # noqa: E402
 from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
 from talif_msresnet.preflight import check_protocol  # noqa: E402
@@ -28,9 +33,29 @@ from talif_msresnet.utils import (  # noqa: E402
     file_lock,
     sha256_file,
 )
+from pilot_health_gate import (  # noqa: E402
+    HealthGateError,
+    validate_current_runtime_against_health_report,
+    validate_pilot_health_report,
+)
 
 PILOT_PLAN_VERSION = 1
 PILOT_PLAN_PATH = PROJECT_ROOT / "environment" / "unfrozen_pilot_plan.json"
+
+
+def _validated_pilot_plan_path(value: str | Path) -> Path:
+    path = _project_path(value)
+    default = PILOT_PLAN_PATH.resolve()
+    if path != default and (
+        path.parent != default.parent
+        or not path.name.startswith("unfrozen_pilot_plan_")
+        or path.suffix.lower() != ".json"
+    ):
+        raise ValueError(
+            "Pilot plans must use environment/unfrozen_pilot_plan.json or a versioned "
+            "environment/unfrozen_pilot_plan_*.json sibling"
+        )
+    return path
 
 
 def _read_manifest(config_dir: Path) -> list[dict[str, str]]:
@@ -79,6 +104,109 @@ def _pilot_block(row: dict[str, str]) -> tuple[str, str, int, int, int]:
     )
 
 
+def _is_v2_pilot(protocol: Mapping[str, Any]) -> bool:
+    return protocol.get("protocol_version") == 2 and protocol.get("study_stage") == "pilot"
+
+
+def _validate_v2_pilot_launch_contract(
+    *,
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    selected_rows: Sequence[dict[str, str]],
+    output_root: str | Path | None,
+    pilot_plan: str | Path | None,
+) -> tuple[Path, Path, Path, dict[str, Any]]:
+    """Bind the v2 quartet to its protocol paths and prior PASS health report."""
+
+    acceptance = protocol.get("pilot_acceptance")
+    if not isinstance(acceptance, Mapping):
+        raise ValueError("The v2 pilot protocol has no pilot_acceptance mapping")
+    if len(selected_rows) != 4:
+        raise ValueError("The v2 pilot must launch one complete four-run C1-C4 block")
+    conditions = [str(row.get("condition")) for row in selected_rows]
+    if conditions != ["C1", "C2", "C3", "C4"]:
+        raise ValueError("The v2 pilot launch order must be exactly C1, C2, C3, C4")
+    if len({_pilot_block(row) for row in selected_rows}) != 1:
+        raise ValueError("The v2 pilot rows must belong to one dataset/depth/T/seed block")
+
+    expected_output = _project_path(str(acceptance.get("pilot_output_root", "")))
+    if output_root is not None and _project_path(output_root) != expected_output:
+        raise ValueError(
+            "--output-root cannot override pilot_acceptance.pilot_output_root"
+        )
+    expected_plan = _validated_pilot_plan_path(
+        str(acceptance.get("pilot_plan", ""))
+    )
+    if pilot_plan is not None and _validated_pilot_plan_path(pilot_plan) != expected_plan:
+        raise ValueError("--pilot-plan cannot override pilot_acceptance.pilot_plan")
+    health_path = _project_path(str(acceptance.get("health_output", "")))
+    try:
+        health_report = validate_pilot_health_report(
+            health_path,
+            protocol_path,
+            repository_root=PROJECT_ROOT,
+            require_current_tracked_clean=True,
+        )
+    except HealthGateError as exc:
+        raise RuntimeError(f"V2 pilot health-report gate blocked execution: {exc}") from exc
+    return expected_output, expected_plan, health_path, health_report
+
+
+def _validate_v2_generated_matrix(
+    *,
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    config_dir: Path,
+    manifest_rows: Sequence[dict[str, str]],
+    matrix_manifest: Mapping[str, Any],
+) -> None:
+    """Require the disk matrix to equal the protocol-generated quartet exactly."""
+
+    expected = [
+        validate_run_mapping(raw, protocol) for raw in generate_run_matrix(protocol)
+    ]
+    expected_ids = [config.runtime.run_id for config in expected]
+    observed_ids = [str(row.get("run_id")) for row in manifest_rows]
+    if observed_ids != expected_ids:
+        raise RuntimeError("V2 generated run manifest differs from the protocol")
+    json_rows = matrix_manifest.get("runs")
+    if not isinstance(json_rows, list) or [
+        str(row.get("run_id")) for row in json_rows if isinstance(row, Mapping)
+    ] != expected_ids:
+        raise RuntimeError("V2 matrix manifest differs from the protocol-generated order")
+
+    for expected_config, row in zip(expected, manifest_rows):
+        run_id = expected_config.runtime.run_id
+        expected_file = f"{run_id}.yaml"
+        if row.get("config_file") != expected_file:
+            raise RuntimeError(f"{run_id}: generated config filename is not canonical")
+        config_path = config_dir / expected_file
+        observed_config = load_run_config(config_path, protocol_path)
+        if observed_config.as_dict() != expected_config.as_dict():
+            raise RuntimeError(
+                f"{run_id}: generated YAML differs from the in-memory protocol matrix"
+            )
+        expected_fields = {
+            "experiment": expected_config.experiment,
+            "dataset": expected_config.data.dataset,
+            "depth": str(expected_config.model.depth),
+            "time_steps": str(expected_config.model.time_steps),
+            "condition": expected_config.model.condition,
+            "topology": expected_config.model.topology,
+            "neuron": expected_config.model.neuron,
+            "seed": str(expected_config.runtime.seed),
+            "config_hash": expected_config.config_hash,
+            "protocol_hash": expected_config.analysis["protocol_hash"],
+        }
+        for key, expected_value in expected_fields.items():
+            if str(row.get(key)) != str(expected_value):
+                raise RuntimeError(
+                    f"{run_id}: run_manifest.csv {key} differs from the protocol matrix"
+                )
+        if row.get("config_file_sha256") != sha256_file(config_path):
+            raise RuntimeError(f"{run_id}: run-manifest config file SHA-256 mismatch")
+
+
 def _prepare_unfrozen_pilot_plan(
     *,
     all_rows: Sequence[dict[str, str]],
@@ -88,9 +216,13 @@ def _prepare_unfrozen_pilot_plan(
     protocol_hash: str,
     output_root: Path,
     formal_root: str | Path,
+    plan_path: Path | None = None,
+    health_report_path: Path | None = None,
+    health_report: Mapping[str, Any] | None = None,
 ) -> Path:
     """Create or verify the global four-cell non-reportable pilot plan."""
 
+    plan_path = _validated_pilot_plan_path(plan_path or PILOT_PLAN_PATH)
     blocks = {_pilot_block(row) for row in selected_rows}
     if len(blocks) != 1:
         raise ValueError("An unfrozen pilot invocation must select one dataset/depth/T/seed block")
@@ -117,8 +249,8 @@ def _prepare_unfrozen_pilot_plan(
         )
     selected_ids = {str(row["run_id"]) for row in selected_rows}
     planned_ids = {run["run_id"] for run in runs}
-    if not selected_ids.issubset(planned_ids):
-        raise ValueError("Selected pilot run is outside the derived C1-C4 plan")
+    if len(selected_rows) != 4 or selected_ids != planned_ids:
+        raise ValueError("Pilot execution must select the complete derived C1-C4 plan")
     formal = _project_path(formal_root)
     expected = {
         "version": PILOT_PLAN_VERSION,
@@ -136,17 +268,31 @@ def _prepare_unfrozen_pilot_plan(
         },
         "runs": runs,
     }
-    with file_lock(PILOT_PLAN_PATH):
-        if PILOT_PLAN_PATH.exists():
-            existing = json.loads(PILOT_PLAN_PATH.read_text(encoding="utf-8"))
+    if (health_report_path is None) != (health_report is None):
+        raise ValueError("Pilot health-report path and payload must be supplied together")
+    if health_report_path is not None and health_report is not None:
+        expected.update(
+            {
+                "version": 2,
+                "acceptance_hash": health_report.get("acceptance_hash"),
+                "git_commit": health_report.get("git_commit"),
+                "health_report": artifact_path_reference(
+                    health_report_path, PROJECT_ROOT
+                ),
+                "health_report_sha256": sha256_file(health_report_path),
+            }
+        )
+    with file_lock(plan_path):
+        if plan_path.exists():
+            existing = json.loads(plan_path.read_text(encoding="utf-8"))
             if existing != expected:
                 raise ValueError(
                     "A different unfrozen pilot plan already exists; archive it with the study "
                     "record instead of changing seed, block, protocol, or output root"
                 )
         else:
-            atomic_write_json(PILOT_PLAN_PATH, expected)
-    return PILOT_PLAN_PATH.resolve()
+            atomic_write_json(plan_path, expected)
+    return plan_path.resolve()
 
 
 def _load_metrics(run_dir: Path) -> dict[str, Any] | None:
@@ -247,6 +393,7 @@ def run_matrix(
     device: str | None = None,
     protocol_path: str | Path = PROJECT_ROOT / "configs" / "protocol.yaml",
     allow_unfrozen_pilot: bool = False,
+    pilot_plan: str | Path | None = None,
     resume_matrix: bool = False,
     limit: int | None = None,
     dry_run: bool = False,
@@ -282,7 +429,13 @@ def run_matrix(
         raise ValueError("No run configurations selected")
     protocol = load_protocol(protocol_path)
     pilot_active = bool(allow_unfrozen_pilot)
+    v2_pilot = bool(pilot_active and _is_v2_pilot(protocol))
     pilot_output_root: Path | None = None
+    selected_pilot_plan = _validated_pilot_plan_path(pilot_plan or PILOT_PLAN_PATH)
+    pilot_health_path: Path | None = None
+    pilot_health_report: dict[str, Any] | None = None
+    pilot_reference_config = None
+    pilot_launch_context: dict[str, Any] | None = None
     if pilot_active:
         if config_path is not None:
             raise ValueError("Unfrozen pilots require --config-dir so the full C1-C4 plan is auditable")
@@ -290,9 +443,26 @@ def run_matrix(
             raise ValueError("--allow-unfrozen-pilot cannot be combined with --dry-run")
         if protocol.get("protocol_status", {}).get("frozen") is True:
             raise ValueError("The protocol is frozen; run formal training without the pilot flag")
-        if limit is None or limit > 4:
-            raise ValueError("Unfrozen pilots require an explicit --limit between 1 and 4")
-        pilot_output_root = _validate_pilot_output_root(output_root, protocol["output_root"])
+        if v2_pilot:
+            (
+                pilot_output_root,
+                selected_pilot_plan,
+                pilot_health_path,
+                pilot_health_report,
+            ) = _validate_v2_pilot_launch_contract(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                selected_rows=rows,
+                output_root=output_root,
+                pilot_plan=pilot_plan,
+            )
+            _validate_pilot_output_root(pilot_output_root, protocol["output_root"])
+        else:
+            if limit != 4:
+                raise ValueError("Unfrozen pilots require an explicit --limit 4")
+            pilot_output_root = _validate_pilot_output_root(
+                output_root, protocol["output_root"]
+            )
     report = check_protocol(
         protocol_path,
         mode="smoke" if dry_run else ("pilot" if pilot_active else "full"),
@@ -322,10 +492,41 @@ def run_matrix(
         metadata = json.loads(matrix_manifest.read_text(encoding="utf-8"))
         if metadata.get("protocol_hash") != report.protocol_hash:
             raise RuntimeError("Generated configs do not match the current protocol; regenerate them")
+        if v2_pilot:
+            _validate_v2_generated_matrix(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                config_dir=config_dir,
+                manifest_rows=all_rows,
+                matrix_manifest=metadata,
+            )
+            assert pilot_health_report is not None
+            reference_row = next(
+                row for row in all_rows if row.get("condition") == "C1"
+            )
+            pilot_reference_config = load_run_config(
+                config_dir / reference_row["config_file"], protocol_path
+            )
+            try:
+                pilot_launch_context = validate_current_runtime_against_health_report(
+                    pilot_health_report,
+                    protocol=protocol,
+                    reference_config=pilot_reference_config,
+                    device=str(device or ""),
+                )
+            except HealthGateError as exc:
+                raise RuntimeError(
+                    f"V2 pilot current-runtime/data gate blocked execution: {exc}"
+                ) from exc
+            print("V2_PILOT_CURRENT_CONTEXT_PASS")
 
     if dry_run:
         training_output_root = _project_path(output_root or PROJECT_ROOT / "results")
         result_root = training_output_root / "smoke"
+    elif pilot_active:
+        assert pilot_output_root is not None
+        training_output_root = pilot_output_root
+        result_root = training_output_root
     else:
         training_output_root = _project_path(output_root or PROJECT_ROOT / "results" / "runs")
         result_root = training_output_root
@@ -338,11 +539,23 @@ def run_matrix(
             protocol_hash=report.protocol_hash,
             output_root=pilot_output_root,
             formal_root=protocol["output_root"],
+            plan_path=selected_pilot_plan,
+            health_report_path=pilot_health_path,
+            health_report=pilot_health_report,
         )
         if pilot_active and pilot_output_root is not None
         else None
     )
     event_path = result_root / "matrix_events.jsonl"
+    if pilot_launch_context is not None:
+        _event(
+            event_path,
+            {
+                "event": "pilot_context_validated",
+                "context": pilot_launch_context,
+                "timestamp": time.time(),
+            },
+        )
     failures = 0
     attempted = 0
     skipped = 0
@@ -380,6 +593,48 @@ def run_matrix(
             })
             print(f"[{index}/{len(rows)}] {run_id}: skipped (complete)")
             continue
+
+        if v2_pilot:
+            assert pilot_health_report is not None
+            assert pilot_reference_config is not None
+            try:
+                run_context = validate_current_runtime_against_health_report(
+                    pilot_health_report,
+                    protocol=protocol,
+                    reference_config=pilot_reference_config,
+                    device=str(device or ""),
+                )
+            except HealthGateError as exc:
+                failures += 1
+                _event(
+                    event_path,
+                    {
+                        "event": "run_blocked",
+                        "index": index,
+                        "total": len(rows),
+                        "run_id": run_id,
+                        "message": f"current runtime/data mismatch: {exc}",
+                        "timestamp": time.time(),
+                    },
+                )
+                print(
+                    f"[{index}/{len(rows)}] {run_id}: BLOCKED: {exc}",
+                    file=sys.stderr,
+                )
+                if stop_on_error:
+                    break
+                continue
+            _event(
+                event_path,
+                {
+                    "event": "run_context_validated",
+                    "index": index,
+                    "total": len(rows),
+                    "run_id": run_id,
+                    "context": run_context,
+                    "timestamp": time.time(),
+                },
+            )
 
         command = [sys.executable, "-m", "talif_msresnet.train", "--config", str(selected_config)]
         command.extend(["--protocol", str(protocol_path)])
@@ -450,7 +705,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-unfrozen-pilot",
         action="store_true",
-        help="Permit at most four non-reportable pilot runs before protocol freeze",
+        help="Permit one complete non-reportable C1-C4 pilot block before protocol freeze",
+    )
+    parser.add_argument(
+        "--pilot-plan",
+        help=(
+            "Immutable pilot-plan path; use a new path for a new protocol generation "
+            "and preserve earlier plans"
+        ),
     )
     parser.add_argument(
         "--resume-matrix",
@@ -479,6 +741,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         None if args.config else args.config_dir, config_path=args.config, output_root=args.output_root,
         device=args.device, protocol_path=args.protocol,
         allow_unfrozen_pilot=args.allow_unfrozen_pilot,
+        pilot_plan=args.pilot_plan,
         resume_matrix=args.resume_matrix,
         limit=args.limit, dry_run=args.dry_run,
         limit_batches=args.limit_batches, experiment=args.experiment,

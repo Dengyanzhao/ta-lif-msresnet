@@ -1,5 +1,13 @@
 # TA-LIF x MS-ResNet
 
+> **Current study status (2026-07-27):** formal v1 is withdrawn from reporting
+> after a structural no-learning defect and a deterministic TA-backward
+> performance incident were identified. Preserve its artifacts for audit only;
+> do not resume its checkpoints or combine them with repaired runs. See
+> `FORMAL_V1_INCIDENT.md`. Development now proceeds through the separate,
+> non-reportable `configs/protocol_v2_pilot.yaml` gate. No v2 formal protocol is
+> frozen yet.
+
 Reference implementation and reproducibility package for the planned
 Knowledge-Based Systems experiment. It implements the controlled 2 x 2 cells:
 
@@ -11,8 +19,9 @@ Knowledge-Based Systems experiment. It implements the controlled 2 x 2 cells:
 | C4 | TA-LIF | MS-ResNet |
 
 This is a reconstructed implementation from the manuscript and dissertation
-description. It is not the unavailable original source code. Do not report its
-results until the authors review and freeze `configs/protocol.yaml`.
+description. It is not the unavailable original source code. The frozen
+`configs/protocol.yaml` identifies the withdrawn v1 study and is retained only
+for reproducibility and incident audit; it is not the active v2 protocol.
 
 ## Environment
 
@@ -196,27 +205,13 @@ are generated.
 not a source of formal 40-run configurations. Do not substitute it for the
 fresh `configs/generated` directory bound by the Phase B manifest.
 
-An explicitly non-reportable GPU pilot should cover all four cells at the same
-dataset/depth/time-step and seed. Each invocation below selects one condition's
-first planned seed, for four runs in total:
-
-```powershell
-foreach ($condition in 'C1', 'C2', 'C3', 'C4') {
-  python scripts/run_matrix.py --config-dir configs/generated `
-    --dataset cifar100 --experiment E1 --condition $condition --limit 1 `
-    --allow-unfrozen-pilot --device cuda --output-root results/pilot
-  if ($LASTEXITCODE -ne 0) { break }
-}
-```
-
-The first pilot invocation creates the global audited plan
-`environment/unfrozen_pilot_plan.json`, binding one seed's complete C1-C4 block,
-the four config hashes, the current protocol hash, and the separate pilot root.
-Later pilot invocations may only execute or resume that quartet; a fifth run,
-another seed/block, another output root, or another protocol is rejected. Pilot
-mode waives only signatures/freeze and still enforces scientific, dependency,
-energy-model, and CIFAR10-DVS provenance checks. The trainer has no public
-unfrozen bypass.
+The only active non-reportable pilot is the fixed v2 seed-77 C1-C4 block in
+`configs/protocol_v2_pilot.yaml`. Follow `V2_PILOT_RUNBOOK.md`: first produce the
+canonical RTX 5090 health report, then launch the complete ordered quartet in
+one invocation. Partial condition selection, a fifth run, another seed/block,
+another output root, stale generated configs, or an unbound health report is
+rejected. A technical interruption may resume only on the same environment from
+that run's own `last.pt`; cross-environment resume is forbidden.
 
 ## Full validation-only training
 

@@ -139,7 +139,7 @@ def _projection(in_channels: int, out_channels: int, stride: int) -> nn.Module:
 
 
 class SpikingBasicBlock(nn.Module):
-    """Conventional spiking residual block with post-addition spike gating."""
+    """Conventional Conv-BN-LIF-Conv-BN-add-LIF residual block."""
 
     expansion = 1
 
@@ -151,24 +151,24 @@ class SpikingBasicBlock(nn.Module):
         neuron_factory: Callable[[], BaseNeuron],
     ) -> None:
         super().__init__()
-        self.neuron1 = neuron_factory()
         self.conv1 = nn.Conv2d(
             in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.neuron2 = neuron_factory()
+        self.neuron1 = neuron_factory()
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.shortcut = _projection(in_channels, out_channels, stride)
-        self.neuron3 = neuron_factory()
+        self.neuron2 = neuron_factory()
 
     def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
         identity = self.shortcut(x)
-        branch = self.neuron1(x)
-        branch = self.bn1(self.conv1(branch))
-        branch = self.neuron2(branch)
+        # ``x`` is already the preceding block's spike output. Re-gating it at
+        # the branch entrance would add a non-modelled LIF and extinguish depth.
+        branch = self.bn1(self.conv1(x))
+        branch = self.neuron1(branch)
         branch = self.bn2(self.conv2(branch))
-        return self.neuron3(identity + branch)
+        return self.neuron2(identity + branch)
 
 
 class MSBasicBlock(nn.Module):

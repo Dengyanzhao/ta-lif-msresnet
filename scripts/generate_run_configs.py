@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Generate the frozen 40-run configuration matrix."""
+"""Generate the protocol-bound run configuration matrix."""
 
 from __future__ import annotations
 
@@ -110,7 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", default=str(PROJECT_ROOT / "configs" / "protocol.yaml"))
     parser.add_argument("--output", default=str(PROJECT_ROOT / "configs" / "generated"))
-    parser.add_argument("--dry-run", action="store_true", help="Validate all 40 runs without writing files")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate every protocol-defined run without writing files",
+    )
     return parser
 
 

@@ -426,13 +426,20 @@ def check_protocol(
                 errors.append(f"protocol_status.confirmations.{field} must be true")
 
     if mode in {"pilot", "full", "final-test"}:
+        matrix = protocol.get("matrix", {})
+        matrix_slots = matrix.get("primary", ()) if isinstance(matrix, Mapping) else ()
+        matrix_datasets = {
+            str(slot.get("dataset"))
+            for slot in matrix_slots
+            if isinstance(slot, Mapping) and slot.get("dataset")
+        }
         analysis = protocol.get("analysis", {})
         if not isinstance(analysis, Mapping):
             analysis = {}
         thresholds = analysis.get("validation_accuracy_thresholds", {})
         if not isinstance(thresholds, Mapping):
             thresholds = {}
-        for dataset in ("cifar10", "cifar100", "cifar10dvs"):
+        for dataset in sorted(matrix_datasets):
             if thresholds.get(dataset) is None:
                 errors.append(f"analysis.validation_accuracy_thresholds.{dataset} must be frozen")
         if analysis.get("interaction_practical_threshold_pp") is None:
@@ -460,7 +467,9 @@ def check_protocol(
                     errors.append("Frozen energy constants SHA-256 differs from protocol")
 
         dvs = protocol.get("datasets", {}).get("cifar10dvs", {})
-        if isinstance(dvs, Mapping):
+        if "cifar10dvs" not in matrix_datasets:
+            pass
+        elif isinstance(dvs, Mapping):
             trainval = _resolve(root, dvs.get("frames_path"))
             test = _resolve(root, dvs.get("test_frames_path"))
             if trainval is None or not trainval.exists():

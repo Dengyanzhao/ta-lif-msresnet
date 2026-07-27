@@ -68,13 +68,72 @@ def test_resnet20_and_resnet56_have_expected_stage_lengths() -> None:
     assert [len(model56.stage1), len(model56.stage2), len(model56.stage3)] == [9, 9, 9]
 
 
-def test_topologies_differ_only_by_post_addition_gate_at_block_level() -> None:
+def test_topologies_move_one_gate_without_changing_neuron_count() -> None:
     conventional = build_model(_config("C1"))
     membrane_shortcut = build_model(_config("C3"))
     assert isinstance(conventional.stage1[0], SpikingBasicBlock)
     assert isinstance(membrane_shortcut.stage1[0], MSBasicBlock)
-    assert hasattr(conventional.stage1[0], "neuron3")
+    assert conventional.parameter_report()["neuron_layers"] == 20
+    assert membrane_shortcut.parameter_report()["neuron_layers"] == 20
+    assert not hasattr(conventional.stage1[0], "neuron3")
     assert not hasattr(membrane_shortcut.stage1[0], "neuron3")
+
+
+class _Scale(torch.nn.Module):
+    def __init__(self, factor: float) -> None:
+        super().__init__()
+        self.factor = factor
+
+    def forward(self, x):
+        return x * self.factor
+
+
+class _RecordingOffset(torch.nn.Module):
+    def __init__(self, offset: float) -> None:
+        super().__init__()
+        self.offset = offset
+        self.inputs = []
+
+    def forward(self, x):
+        self.inputs.append(x.detach().clone())
+        return x + self.offset
+
+
+def test_conventional_block_has_no_redundant_entry_spike_gate() -> None:
+    block = SpikingBasicBlock(1, 1, 1, lambda: torch.nn.Identity())
+    block.conv1 = _Scale(2.0)
+    block.bn1 = torch.nn.Identity()
+    block.neuron1 = _RecordingOffset(10.0)
+    block.conv2 = _Scale(3.0)
+    block.bn2 = torch.nn.Identity()
+    block.shortcut = torch.nn.Identity()
+    block.neuron2 = _RecordingOffset(100.0)
+
+    inputs = torch.tensor([[[[2.0]]]])
+    output = block(inputs)
+
+    assert torch.equal(block.neuron1.inputs[0], torch.tensor([[[[4.0]]]]))
+    assert torch.equal(block.neuron2.inputs[0], torch.tensor([[[[44.0]]]]))
+    assert torch.equal(output, torch.tensor([[[[144.0]]]]))
+
+
+def test_conventional_resnet_keeps_deep_activity_and_end_to_end_gradients() -> None:
+    torch.manual_seed(0)
+    model = build_model(_config("C1", time_steps=6))
+    model.train()
+    logits, diagnostics = model(
+        torch.randn(2, 3, 8, 8), collect_activity=True,
+    )
+    torch.nn.functional.cross_entropy(logits, torch.tensor([1, 7])).backward()
+
+    assert diagnostics["layers"]["stage3.2.neuron2"]["spike_rate"] > 0
+    assert diagnostics["layers"]["terminal_neuron"]["spike_rate"] > 0
+    parameters = dict(model.named_parameters())
+    for name in ("fc.weight", "stage3.2.conv2.weight", "stem_conv.weight"):
+        gradient = parameters[name].grad
+        assert gradient is not None
+        assert torch.isfinite(gradient).all()
+        assert gradient.norm().item() > 0
 
 
 def test_convolution_initialization_is_pairable_across_all_conditions() -> None:
@@ -98,11 +157,16 @@ def test_explicit_convolution_state_transfer() -> None:
 def test_parameter_report_separates_talif_threshold_overhead() -> None:
     lif = build_model(_config("C1", time_steps=2)).parameter_report()
     talif = build_model(_config("C2", time_steps=2)).parameter_report()
+    ms_lif = build_model(_config("C3", time_steps=2)).parameter_report()
+    ms_talif = build_model(_config("C4", time_steps=2)).parameter_report()
     assert lif["threshold_parameters"] == 0
     assert talif["threshold_parameters"] == talif["neuron_layers"] * 2 * 2
     assert talif["total_parameters"] > lif["total_parameters"]
     assert talif["conv_parameters"] == lif["conv_parameters"]
     assert talif["convolution_parameter_names"] == lif["convolution_parameter_names"]
+    assert ms_lif["total_parameters"] == lif["total_parameters"]
+    assert ms_talif["total_parameters"] == talif["total_parameters"]
+    assert ms_talif["threshold_parameters"] == talif["threshold_parameters"]
 
 
 def test_condition_mismatch_and_bad_input_fail_fast() -> None:

@@ -48,6 +48,59 @@ PRESPECIFIED_PRIMARY_GROUPS: Tuple[Tuple[str, str, int, int], ...] = (
     ("E1", "cifar100", 20, 6),
     ("E1", "cifar10dvs", 20, 10),
 )
+V2_PILOT_SEEDS: Tuple[int, ...] = (77,)
+V2_PILOT_PRIMARY_GROUPS: Tuple[Tuple[str, str, int, int], ...] = (
+    ("E1", "cifar100", 20, 6),
+)
+V2_PILOT_ACCEPTANCE: Dict[str, Any] = {
+    "artifact_class": "non_reportable_pilot",
+    "seed": 77,
+    "dataset": "cifar100",
+    "conditions": ["C1", "C2", "C3", "C4"],
+    "health_output": "results/pilot/v2_seed77_e120_health.json",
+    "validation_output": "results/pilot/v2_seed77_e120_validation.json",
+    "pilot_output_root": "results/pilot/v2_seed77_e120",
+    "pilot_plan": "environment/unfrozen_pilot_plan_v2_seed77_e120.json",
+    "environment": {
+        "expected_gpu_substring": "RTX 5090",
+        "pytorch_version": "2.9.1+cu128",
+        "cuda_runtime": "12.8",
+        "precision": "float32",
+        "deterministic": True,
+    },
+    "overfit": {
+        "batch_size": 8,
+        "steps": 40,
+        "minimum_accuracy": 0.50,
+        "maximum_loss_fraction": 0.90,
+        "minimum_ta_routed_gradient_coverage": 0.90,
+    },
+    "timing": {
+        "batch_size": 64,
+        "warmup_steps": 2,
+        "timed_steps": 5,
+        "maximum_ta_enabled_over_frozen_ratio": 3.0,
+        "epoch_time_ratio_statistic": (
+            "median_enabled_train_seconds_over_median_frozen_train_seconds"
+        ),
+        "epoch_time_ratio_conditions": ["C2", "C4"],
+        "ta_state_source": "events_jsonl_epoch_completed_ta_enabled",
+    },
+    "schedule": {
+        "candidate_epochs": 120,
+        "required_best_validation_accuracy": 0.60,
+        "require_all_conditions_converged": True,
+        "technical_interruption_policy": (
+            "same_environment_last_checkpoint_resume_permitted"
+        ),
+        "cross_environment_resume": "forbidden",
+        "retained_failure_artifacts": (
+            "allowed_only_after_later_successful_same_run_completion"
+        ),
+        "fallback_epochs": 160,
+        "fallback_action": "fresh_protocol_and_fresh_runs_no_resume",
+    },
+}
 EXPECTED_RUN_COUNT = (
     len(PRESPECIFIED_PRIMARY_GROUPS) * len(SUPPORTED_CONDITIONS) * len(PRESPECIFIED_SEEDS)
 )
@@ -355,7 +408,7 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     allowed = {
         "protocol_version", "seeds", "output_root", "data", "datasets", "model",
         "optimizer", "runtime", "matrix", "experiments", "conditions", "analysis",
-        "protocol_status", "benchmark",
+        "protocol_status", "benchmark", "study_stage", "pilot_acceptance",
     }
     _check_keys(raw, allowed, "protocol")
     required = {
@@ -367,13 +420,34 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if missing:
         raise ConfigError(f"Protocol is missing required section(s): {', '.join(missing)}")
     version = _int(raw.get("protocol_version", 1), "protocol_version", 1)
-    seeds_raw = raw.get("seeds", list(PRESPECIFIED_SEEDS))
+    if version not in (1, 2):
+        raise ConfigError("protocol_version must be 1 or 2")
+    study_stage = raw.get("study_stage")
+    if version == 1:
+        if study_stage is not None:
+            raise ConfigError("protocol_version 1 must not define study_stage")
+        if "pilot_acceptance" in raw:
+            raise ConfigError("protocol_version 1 must not define pilot_acceptance")
+        expected_seeds = PRESPECIFIED_SEEDS
+    else:
+        _require_exact(study_stage, "pilot", "study_stage")
+        acceptance = _check_mapping(
+            raw.get("pilot_acceptance"), "protocol.pilot_acceptance"
+        )
+        _check_keys(
+            acceptance, V2_PILOT_ACCEPTANCE, "protocol.pilot_acceptance"
+        )
+        _require_exact(
+            dict(acceptance), V2_PILOT_ACCEPTANCE, "protocol.pilot_acceptance"
+        )
+        expected_seeds = V2_PILOT_SEEDS
+    seeds_raw = raw.get("seeds", list(expected_seeds))
     if not isinstance(seeds_raw, Sequence) or isinstance(seeds_raw, (str, bytes)) or not seeds_raw:
         raise ConfigError("seeds must be a non-empty sequence")
     seeds = [_int(v, "seeds[]", 0) for v in seeds_raw]
     if len(set(seeds)) != len(seeds):
         raise ConfigError("seeds must be unique")
-    _require_exact(tuple(seeds), PRESPECIFIED_SEEDS, "seeds")
+    _require_exact(tuple(seeds), expected_seeds, "seeds")
     output_root = str(raw.get("output_root", "results"))
     if not output_root:
         raise ConfigError("output_root cannot be empty")
@@ -426,7 +500,10 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
                 raise ConfigError(f"protocol.matrix.{group} must be a sequence")
             for index, slot in enumerate(slots):
                 slot = _check_mapping(slot, f"protocol.matrix.{group}[{index}]")
-                _check_keys(slot, {"experiment", "dataset", "depth", "time_steps"}, f"protocol.matrix.{group}[{index}]")
+                slot_keys = {"experiment", "dataset", "depth", "time_steps"}
+                if version == 2:
+                    slot_keys.add("seeds")
+                _check_keys(slot, slot_keys, f"protocol.matrix.{group}[{index}]")
                 for required in ("experiment", "dataset", "depth", "time_steps"):
                     if required not in slot:
                         raise ConfigError(f"protocol.matrix.{group}[{index}] missing {required}")
@@ -434,8 +511,40 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
                 _str(slot["dataset"], f"protocol.matrix.{group}[{index}].dataset", ("cifar10", "cifar100", "cifar10dvs"))
                 _int(slot["depth"], f"protocol.matrix.{group}[{index}].depth", 1)
                 _int(slot["time_steps"], f"protocol.matrix.{group}[{index}].time_steps", 1)
+                if "seeds" in slot:
+                    slot_seeds = slot["seeds"]
+                    if (
+                        not isinstance(slot_seeds, Sequence)
+                        or isinstance(slot_seeds, (str, bytes))
+                        or not slot_seeds
+                    ):
+                        raise ConfigError(
+                            f"protocol.matrix.{group}[{index}].seeds must be a non-empty sequence"
+                        )
+                    parsed_slot_seeds = [
+                        _int(value, f"protocol.matrix.{group}[{index}].seeds[]", 0)
+                        for value in slot_seeds
+                    ]
+                    if len(set(parsed_slot_seeds)) != len(parsed_slot_seeds):
+                        raise ConfigError(
+                            f"protocol.matrix.{group}[{index}].seeds must be unique"
+                        )
+                    if any(seed not in seeds for seed in parsed_slot_seeds):
+                        raise ConfigError(
+                            f"protocol.matrix.{group}[{index}].seeds must be drawn from top-level seeds"
+                        )
         primary = tuple(_matrix_group_tuple(slot) for slot in matrix.get("primary", ()))
-        _require_exact(primary, PRESPECIFIED_PRIMARY_GROUPS, "protocol.matrix.primary")
+        expected_groups = (
+            PRESPECIFIED_PRIMARY_GROUPS if version == 1 else V2_PILOT_PRIMARY_GROUPS
+        )
+        _require_exact(primary, expected_groups, "protocol.matrix.primary")
+        if version == 2:
+            slot = matrix["primary"][0]
+            _require_exact(
+                tuple(slot.get("seeds", ())),
+                V2_PILOT_SEEDS,
+                "protocol.matrix.primary[0].seeds",
+            )
     if "analysis" in raw:
         _validate_analysis_mapping(
             _check_mapping(raw["analysis"], "protocol.analysis"), "protocol.analysis"
@@ -444,6 +553,8 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
         _validate_protocol_status(
             _check_mapping(raw["protocol_status"], "protocol.protocol_status")
         )
+        if version == 2 and raw["protocol_status"].get("frozen") is not False:
+            raise ConfigError("The v2 pilot protocol must remain unfrozen")
     if "benchmark" in raw:
         _validate_benchmark_mapping(
             _check_mapping(raw["benchmark"], "protocol.benchmark"), "protocol.benchmark"
@@ -574,6 +685,8 @@ def _validate_optimizer_mapping(opt: Mapping[str, Any], name: str) -> None:
         parsed = [_int(v, f"{name}.milestones[]", 1) for v in values]
         if parsed != sorted(set(parsed)):
             raise ConfigError(f"{name}.milestones must be strictly increasing")
+        if "epochs" in opt and any(value >= int(opt["epochs"]) for value in parsed):
+            raise ConfigError(f"{name}.milestones must be smaller than epochs")
     if "grad_clip" in opt and opt["grad_clip"] is not None:
         _float(opt["grad_clip"], f"{name}.grad_clip", 0.0)
 
@@ -946,6 +1059,8 @@ def validate_run_mapping(raw: Mapping[str, Any], protocol: Mapping[str, Any] | N
     _check_keys(raw, allowed, "run")
     protocol = {} if protocol is None else dict(protocol)
     version = _int(raw.get("protocol_version", protocol.get("protocol_version", 1)), "protocol_version", 1)
+    if protocol:
+        _require_exact(version, protocol.get("protocol_version"), "protocol_version")
     experiment = _str(raw.get("experiment", "E1"), "experiment")
     data = _resolve_data(raw, protocol)
     # Top-level seed is a deliberate shorthand for generated matrix files.
@@ -993,7 +1108,7 @@ def load_run_config(path: str | Path, protocol_path: str | Path | None = None) -
 
 
 def _dataset_specs(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """Resolve the two declared confirmatory dataset/depth/time-step slots."""
+    """Resolve declared dataset/depth/time-step slots and their seed blocks."""
 
     datasets = protocol.get("datasets", {})
     if not isinstance(datasets, Mapping):
@@ -1013,31 +1128,37 @@ def _dataset_specs(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
         depth = int(raw["depth"])
         time_steps = int(raw["time_steps"])
         experiment = str(raw["experiment"])
-        slots.append(spec(dataset, depth, time_steps, experiment))
+        resolved = spec(dataset, depth, time_steps, experiment)
+        resolved["_matrix_seeds"] = list(raw.get("seeds", protocol["seeds"]))
+        slots.append(resolved)
     return slots
 
 
 def generate_run_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """Generate the 40 unique confirmatory condition/seed configurations.
-
-    The matrix consists of two dataset/depth/time slots, four fixed conditions,
-    and five complete-block seeds.
-    """
+    """Generate the versioned C1-C4 matrix without mixing protocol generations."""
 
     protocol = validate_protocol(protocol)
-    seeds = list(protocol["seeds"])
     protocol_hash = hashlib.sha256(canonical_json(protocol).encode("utf-8")).hexdigest()
     runs: List[Dict[str, Any]] = []
     seen: set[Tuple[Any, ...]] = set()
     for slot in _dataset_specs(protocol):
-        for condition in SUPPORTED_CONDITIONS:
-            for seed in seeds:
+        slot_seeds = list(slot["_matrix_seeds"])
+        pairs = (
+            ((condition, seed) for condition in SUPPORTED_CONDITIONS for seed in slot_seeds)
+            if protocol["protocol_version"] == 1
+            else ((condition, seed) for seed in slot_seeds for condition in SUPPORTED_CONDITIONS)
+        )
+        for condition, seed in pairs:
                 key = (slot["dataset"], slot["depth"], slot["time_steps"], condition, seed)
                 if key in seen:
                     continue
                 seen.add(key)
                 run_id = f"{slot['experiment']}_{slot['dataset']}_d{slot['depth']}_t{slot['time_steps']}_{condition}_s{seed}"
-                data = {k: v for k, v in slot.items() if k not in {"depth", "time_steps", "experiment"}}
+                data = {
+                    k: v
+                    for k, v in slot.items()
+                    if k not in {"depth", "time_steps", "experiment", "_matrix_seeds"}
+                }
                 model = {
                     "condition": condition,
                     "topology": CONDITION_SPECS[condition]["topology"],
@@ -1060,9 +1181,15 @@ def generate_run_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
                     "final_test": False,
                     "analysis": analysis,
                 })
-    if len(runs) != EXPECTED_RUN_COUNT:
+    expected_run_count = (
+        EXPECTED_RUN_COUNT
+        if protocol["protocol_version"] == 1
+        else sum(len(slot["_matrix_seeds"]) for slot in _dataset_specs(protocol))
+        * len(SUPPORTED_CONDITIONS)
+    )
+    if len(runs) != expected_run_count:
         raise ConfigError(
-            f"Expected {EXPECTED_RUN_COUNT} unique runs, generated {len(runs)}"
+            f"Expected {expected_run_count} unique runs, generated {len(runs)}"
         )
     if any(run["experiment"] != "E1" for run in runs):
         raise ConfigError("The confirmatory matrix must contain only E1 runs")

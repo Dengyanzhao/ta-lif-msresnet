@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -134,6 +135,16 @@ def build_optimizer_and_scheduler(
 def _set_ta_enabled(parameters: Iterable[torch.nn.Parameter], enabled: bool) -> None:
     for parameter in parameters:
         parameter.requires_grad_(enabled)
+
+
+def _ta_enabled_for_epoch(
+    parameters: Sequence[torch.nn.Parameter],
+    epoch: int,
+    activation_epoch: int,
+) -> bool:
+    """Report TA as enabled only when the model actually owns TA parameters."""
+
+    return bool(parameters) and epoch >= activation_epoch
 
 
 def _reset_state(model: torch.nn.Module) -> None:
@@ -396,8 +407,9 @@ def _checkpoint_payload(
     best_val: Mapping[str, Any],
     config: RunConfig,
     train_history: Sequence[Mapping[str, Any]],
+    training_environment_sha256: str | None = None,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict(),
@@ -409,6 +421,9 @@ def _checkpoint_payload(
         "train_history": list(train_history),
         "rng_state": capture_rng_state(),
     }
+    if training_environment_sha256 is not None:
+        payload["training_environment_sha256"] = training_environment_sha256
+    return payload
 
 
 def validate_resume_checkpoint_path(path: str | Path) -> Path:
@@ -429,11 +444,18 @@ def _load_resume(
     optimizer: torch.optim.Optimizer,
     scheduler: Any,
     config: RunConfig,
+    expected_training_environment_sha256: str | None = None,
 ) -> Tuple[int, Dict[str, Any], List[Dict[str, Any]]]:
     path = validate_resume_checkpoint_path(path)
     checkpoint = load_checkpoint(path, map_location="cpu")
     if checkpoint.get("config_hash") != config.config_hash:
         raise RuntimeError("Resume checkpoint config_hash does not match the current run")
+    if expected_training_environment_sha256 is not None and checkpoint.get(
+        "training_environment_sha256"
+    ) != expected_training_environment_sha256:
+        raise RuntimeError(
+            "Resume checkpoint training environment differs from the current process"
+        )
     checkpoint_config = checkpoint.get("config", {})
     checkpoint_runtime = (
         checkpoint_config.get("runtime", {}) if isinstance(checkpoint_config, Mapping) else {}
@@ -453,6 +475,40 @@ def _load_resume(
         dict(checkpoint.get("best_val", {})),
         [dict(item) for item in history],
     )
+
+
+def _validate_resume_run_environment(
+    run_dir: Path,
+    resume_path: str | Path,
+    current_environment_sha256: str,
+) -> dict[str, Any]:
+    """Validate the pre-existing run identity before its manifest is replaced."""
+
+    checkpoint = Path(resume_path).resolve()
+    if not checkpoint.is_file():
+        raise RuntimeError("Resume checkpoint last.pt is missing")
+    if checkpoint.parent != run_dir.resolve():
+        raise RuntimeError("Resume last.pt must belong to the current run directory")
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("Resume requires the previous run_manifest.json")
+    try:
+        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read previous run manifest: {exc}") from exc
+    if not isinstance(previous, dict):
+        raise RuntimeError("Previous run manifest must be a JSON object")
+    environment = previous.get("environment")
+    previous_hash = (
+        environment.get("training_environment_sha256")
+        if isinstance(environment, Mapping)
+        else None
+    )
+    if previous_hash != current_environment_sha256:
+        raise RuntimeError(
+            "Cross-environment resume is forbidden: previous and current identities differ"
+        )
+    return previous
 
 
 def _manifest_sha256(loaders: Mapping[str, Any]) -> str:
@@ -576,7 +632,11 @@ def _training_environment_identity(
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def run(config: RunConfig) -> Dict[str, Any]:
+def run(
+    config: RunConfig,
+    *,
+    orchestrator_evidence: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     """Execute a run, preserving both successful and failed run artifacts."""
 
     if config.final_test:
@@ -606,6 +666,13 @@ def run(config: RunConfig) -> Dict[str, Any]:
             "training_environment_sha256": training_environment_sha256,
         }
     )
+    previous_manifest: dict[str, Any] | None = None
+    if config.runtime.resume:
+        previous_manifest = _validate_resume_run_environment(
+            run_dir,
+            config.runtime.resume,
+            training_environment_sha256,
+        )
     model: torch.nn.Module | None = None
     optimizer: torch.optim.Optimizer | None = None
     scheduler: Any = None
@@ -647,21 +714,46 @@ def run(config: RunConfig) -> Dict[str, Any]:
                 "training_environment_sha256": training_environment_sha256,
             },
         }
+        if orchestrator_evidence is not None:
+            manifest["orchestrator_evidence"] = dict(orchestrator_evidence)
+        if previous_manifest is not None:
+            prior_history = previous_manifest.get("resume_history", [])
+            if not isinstance(prior_history, list):
+                raise RuntimeError("Previous run manifest resume_history is malformed")
+            manifest["resume_history"] = [
+                *prior_history,
+                {
+                    "resumed_at": started_at,
+                    "checkpoint": "last.pt",
+                    "training_environment_sha256": training_environment_sha256,
+                },
+            ]
         atomic_write_json(run_dir / "run_manifest.json", manifest)
         logger.log(
             "run_started", device=str(device), dry_run=config.runtime.dry_run,
             config_hash=config.config_hash, parameter_report=report,
             ta_activation_epoch_zero_based=ta_activation_epoch,
+            orchestrator_evidence=(
+                dict(orchestrator_evidence) if orchestrator_evidence is not None else None
+            ),
         )
         start_epoch = 0
         train_history: List[Dict[str, Any]] = []
         if config.runtime.resume:
             start_epoch, best_val, train_history = _load_resume(
-                config.runtime.resume, model, optimizer, scheduler, config
+                config.runtime.resume,
+                model,
+                optimizer,
+                scheduler,
+                config,
+                expected_training_environment_sha256=training_environment_sha256,
             )
             logger.log("resumed", checkpoint=config.runtime.resume, start_epoch=start_epoch)
         # Resume must restore whether TA parameters are still frozen.
-        _set_ta_enabled(ta_parameters, start_epoch >= ta_activation_epoch)
+        _set_ta_enabled(
+            ta_parameters,
+            _ta_enabled_for_epoch(ta_parameters, start_epoch, ta_activation_epoch),
+        )
         amp_enabled = bool(config.runtime.amp and device.type == "cuda")
         try:
             scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
@@ -674,7 +766,9 @@ def run(config: RunConfig) -> Dict[str, Any]:
             sampler = getattr(loaders["train"], "sampler", None)
             if hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(current_epoch)
-            ta_enabled = current_epoch >= ta_activation_epoch
+            ta_enabled = _ta_enabled_for_epoch(
+                ta_parameters, current_epoch, ta_activation_epoch
+            )
             _set_ta_enabled(ta_parameters, ta_enabled)
             train_metrics = train_one_epoch(model, loaders["train"], optimizer, device, current_epoch, config, logger, scaler)
             val_metrics = evaluate(model, loaders["val"], device, config, "val")
@@ -696,6 +790,7 @@ def run(config: RunConfig) -> Dict[str, Any]:
                     run_dir / "best.pt",
                     _checkpoint_payload(
                         model, optimizer, scheduler, current_epoch, best_val, config, train_history
+                        , training_environment_sha256
                     ),
                 )
             logger.log(
@@ -709,6 +804,7 @@ def run(config: RunConfig) -> Dict[str, Any]:
                     run_dir / "last.pt",
                     _checkpoint_payload(
                         model, optimizer, scheduler, current_epoch, best_val, config, train_history
+                        , training_environment_sha256
                     ),
                 )
         if not train_history:
@@ -785,6 +881,7 @@ def run(config: RunConfig) -> Dict[str, Any]:
                     _checkpoint_payload(
                         model, optimizer, scheduler, current_epoch, best_val, config,
                         train_history if "train_history" in locals() else [],
+                        training_environment_sha256,
                     ),
                 )
             except Exception as checkpoint_exc:
@@ -822,15 +919,24 @@ def _validate_orchestrator_pilot_plan(
     protocol_path: str | Path,
     protocol_hash: str,
     output_dir_was_explicit: bool,
-) -> None:
+) -> dict[str, Any]:
     """Revalidate the runner-created global pilot plan inside the trainer."""
 
-    if plan_path.resolve() != PILOT_PLAN_PATH.resolve():
-        raise ValueError("Pilot plan must use the repository-global audited plan path")
+    resolved_plan = plan_path.resolve()
+    default_plan = PILOT_PLAN_PATH.resolve()
+    if resolved_plan != default_plan and (
+        resolved_plan.parent != default_plan.parent
+        or not resolved_plan.name.startswith("unfrozen_pilot_plan_")
+        or resolved_plan.suffix.lower() != ".json"
+    ):
+        raise ValueError(
+            "Pilot plan must use the default audited path or a versioned "
+            "unfrozen_pilot_plan_*.json sibling"
+        )
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("Pilot plan must be a mapping")
-    if payload.get("version") != 1 or payload.get("non_reportable") is not True:
+    if payload.get("version") not in {1, 2} or payload.get("non_reportable") is not True:
         raise ValueError("Pilot plan is not a recognized non-reportable plan")
     if payload.get("protocol_hash") != protocol_hash:
         raise ValueError("Pilot plan protocol hash differs from the current protocol")
@@ -839,6 +945,49 @@ def _validate_orchestrator_pilot_plan(
     protocol = load_protocol(protocol_path)
     if protocol.get("protocol_status", {}).get("frozen") is True:
         raise ValueError("A frozen protocol cannot use the unfrozen pilot plan")
+    is_v2_pilot = (
+        protocol.get("protocol_version") == 2
+        and protocol.get("study_stage") == "pilot"
+    )
+    if is_v2_pilot:
+        if payload.get("version") != 2:
+            raise ValueError("The v2 pilot requires a health-bound version-2 plan")
+        acceptance = protocol.get("pilot_acceptance")
+        if not isinstance(acceptance, Mapping):
+            raise ValueError("The v2 pilot protocol has no pilot_acceptance mapping")
+        if payload.get("acceptance_hash") != stable_hash(dict(acceptance)):
+            raise ValueError("Pilot plan acceptance hash differs from the protocol")
+        health_path = Path(str(acceptance.get("health_output", "")))
+        if not health_path.is_absolute():
+            health_path = PROJECT_ROOT / health_path
+        health_path = health_path.resolve()
+        if payload.get("health_report") != artifact_path_reference(
+            health_path, PROJECT_ROOT
+        ):
+            raise ValueError("Pilot plan health-report path differs from the protocol")
+        if not health_path.is_file() or payload.get("health_report_sha256") != sha256_file(
+            health_path
+        ):
+            raise ValueError("Pilot plan health-report SHA-256 is missing or stale")
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        current_commit = completed.stdout.strip()
+        if completed.returncode != 0 or payload.get("git_commit") != current_commit:
+            raise ValueError("Pilot plan Git commit differs from the current checkout")
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status.returncode != 0 or status.stdout.strip():
+            raise ValueError("The tracked worktree changed after the pilot health gate")
     if not output_dir_was_explicit:
         raise ValueError("Pilot execution requires an explicit orchestrator output directory")
     protocol_output_root = protocol.get("output_root", "results")
@@ -874,6 +1023,22 @@ def _validate_orchestrator_pilot_plan(
         raise ValueError("Current run config path differs from the pilot plan")
     if planned.get("config_file_sha256") != sha256_file(config_path):
         raise ValueError("Current run config file SHA-256 differs from the pilot plan")
+    evidence = {
+        "pilot_plan": artifact_path_reference(resolved_plan, PROJECT_ROOT),
+        "pilot_plan_sha256": sha256_file(resolved_plan),
+        "plan_version": payload.get("version"),
+        "protocol_hash": protocol_hash,
+    }
+    if is_v2_pilot:
+        evidence.update(
+            {
+                "acceptance_hash": payload.get("acceptance_hash"),
+                "git_commit": payload.get("git_commit"),
+                "health_report": payload.get("health_report"),
+                "health_report_sha256": payload.get("health_report_sha256"),
+            }
+        )
+    return evidence
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -926,9 +1091,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = _override_config(load_run_config(args.config, args.protocol), args)
     if config.analysis.get("protocol_hash") != report.protocol_hash:
         raise SystemExit("Run config protocol hash is stale; regenerate configs from the current protocol")
+    orchestrator_evidence: dict[str, Any] | None = None
     if args.orchestrator_pilot_plan is not None:
         try:
-            _validate_orchestrator_pilot_plan(
+            orchestrator_evidence = _validate_orchestrator_pilot_plan(
                 args.orchestrator_pilot_plan,
                 config=config,
                 config_path=args.config,
@@ -939,7 +1105,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"Pilot plan validation failed: {exc}") from exc
     try:
-        result = run(config)
+        result = run(config, orchestrator_evidence=orchestrator_evidence)
     except BaseException as exc:
         print(f"Run {config.runtime.run_id} failed: {exc}", file=sys.stderr)
         return 1

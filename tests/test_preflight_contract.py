@@ -25,6 +25,19 @@ def test_pilot_mode_does_not_bypass_scientific_data_checks(tmp_path: Path) -> No
     assert any("CIFAR10-DVS" in error for error in report.errors)
 
 
+def test_cifar100_only_v2_pilot_does_not_require_dvs_artifacts(tmp_path: Path) -> None:
+    report = check_protocol(
+        ROOT / "configs" / "protocol_v2_pilot.yaml",
+        mode="pilot",
+        project_root=tmp_path,
+        check_dependencies=False,
+    )
+
+    assert report.ok
+    assert any("unsigned and unfrozen" in warning for warning in report.warnings)
+    assert not any("CIFAR10-DVS" in error for error in report.errors)
+
+
 def test_full_mode_still_requires_author_freeze(
     unfrozen_protocol_path: Path,
 ) -> None:

@@ -105,6 +105,63 @@ def rectangular_spike(u: Tensor, v1: Tensor, v2: Tensor) -> Tensor:
 surrogate_spike = rectangular_spike
 
 
+class _HistoryWindowSelect(torch.autograd.Function):
+    """Select two history banks with a deterministic, bounded-cost backward.
+
+    ``bank[index]`` is inexpensive in the forward pass, but its CUDA backward
+    aggregates many repeated indices with an indexed write.  Under strict
+    deterministic algorithms that path can be prohibitively slow for dense
+    feature maps and tiny TA-LIF banks.  The derivative with respect to bank
+    entry ``k`` is simply the sum of output gradients whose index is ``k``.
+    Multiplying the output gradients by a fixed-order indicator basis computes
+    all of those sums without indexed gradient writes while preserving the
+    exact mathematical operation.
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        bank_v1: Tensor,
+        bank_v2: Tensor,
+        index: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        ctx.bank_size = bank_v1.shape[0]
+        ctx.save_for_backward(index)
+        return bank_v1[index], bank_v2[index]
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx,
+        grad_v1: Optional[Tensor],
+        grad_v2: Optional[Tensor],
+    ) -> Tuple[Optional[Tensor], Optional[Tensor], None]:
+        (index,) = ctx.saved_tensors
+        flat_index = index.reshape(-1)
+        reference = grad_v1 if grad_v1 is not None else grad_v2
+        if reference is None:
+            return None, None, None
+        slots = torch.arange(ctx.bank_size, device=index.device)
+        indicator = (flat_index.unsqueeze(1) == slots.unsqueeze(0)).to(dtype=reference.dtype)
+
+        if grad_v1 is None:
+            reduced_v2 = grad_v2.reshape(1, -1).matmul(indicator).squeeze(0)
+            return None, reduced_v2, None
+        if grad_v2 is None:
+            reduced_v1 = grad_v1.reshape(1, -1).matmul(indicator).squeeze(0)
+            return reduced_v1, None, None
+
+        gradients = torch.stack((grad_v1.reshape(-1), grad_v2.reshape(-1))).matmul(indicator)
+        return gradients[0], gradients[1], None
+
+
+def _select_history_windows(
+    bank_v1: Tensor,
+    bank_v2: Tensor,
+    index: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    return _HistoryWindowSelect.apply(bank_v1, bank_v2, index)
+
+
 def _inverse_softplus(value: Tensor) -> Tensor:
     """Stable inverse used only to initialise TA-LIF widths."""
 
@@ -327,7 +384,7 @@ class TALIFNeuron(BaseNeuron):
         index = count.clamp(min=0, max=self.steps - 1).long()
         bank_v1 = self.v1.to(device=x.device, dtype=x.dtype)
         bank_v2 = self.v2.to(device=x.device, dtype=x.dtype)
-        return bank_v1[index], bank_v2[index]
+        return _select_history_windows(bank_v1, bank_v2, index)
 
     def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
         if not x.is_floating_point():

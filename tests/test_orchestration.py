@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import evaluate_checkpoints as final_eval  # noqa: E402
 import run_matrix as matrix_runner  # noqa: E402
 import talif_msresnet.train as trainer  # noqa: E402
-from talif_msresnet.train import SEED_METRIC_FIELDS, validate_resume_checkpoint_path  # noqa: E402
+from talif_msresnet.train import (  # noqa: E402
+    SEED_METRIC_FIELDS,
+    _validate_resume_run_environment,
+    validate_resume_checkpoint_path,
+)
+from talif_msresnet.config import load_protocol  # noqa: E402
 from talif_msresnet.utils import sha256_file  # noqa: E402
 
 
@@ -28,6 +34,35 @@ def test_resume_accepts_only_last_checkpoint() -> None:
         validate_resume_checkpoint_path("some/run/best.pt")
     with pytest.raises(ValueError, match="only supported from last.pt"):
         validate_resume_checkpoint_path("some/run/failed.pt")
+
+
+def test_resume_rejects_a_different_training_environment(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    checkpoint = run_dir / "last.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "training_environment_sha256": "same-environment",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    previous = _validate_resume_run_environment(
+        run_dir, checkpoint, "same-environment"
+    )
+    assert previous["environment"]["training_environment_sha256"] == "same-environment"
+    with pytest.raises(RuntimeError, match="Cross-environment"):
+        _validate_resume_run_environment(run_dir, checkpoint, "other-environment")
+    foreign = tmp_path / "foreign" / "last.pt"
+    foreign.parent.mkdir()
+    foreign.write_bytes(b"checkpoint")
+    with pytest.raises(RuntimeError, match="current run directory"):
+        _validate_resume_run_environment(run_dir, foreign, "same-environment")
 
 
 def test_unfrozen_pilot_requires_a_separate_output_root() -> None:
@@ -68,6 +103,26 @@ def test_pilot_plan_uses_portable_paths_and_trainer_revalidates(
             }
         )
 
+    monkeypatch.setattr(
+        matrix_runner,
+        "load_run_config",
+        lambda path, protocol: SimpleNamespace(
+            runtime=SimpleNamespace(run_id=f"run-{Path(path).stem}"),
+            config_hash=f"hash-{Path(path).stem}",
+        ),
+    )
+    monkeypatch.setattr(matrix_runner, "PILOT_PLAN_PATH", tmp_path / "plan.json")
+    with pytest.raises(ValueError, match="complete derived C1-C4"):
+        matrix_runner._prepare_unfrozen_pilot_plan(
+            all_rows=rows,
+            selected_rows=rows[:1],
+            config_dir=config_dir,
+            protocol_path=unfrozen_protocol_path,
+            protocol_hash="protocol-hash",
+            output_root=tmp_path / "pilot",
+            formal_root="results/runs",
+        )
+
     def fake_load(path: Path, _protocol: Path) -> SimpleNamespace:
         condition = Path(path).stem
         return SimpleNamespace(
@@ -82,7 +137,7 @@ def test_pilot_plan_uses_portable_paths_and_trainer_revalidates(
     pilot_root = tmp_path / "external-pilot"
     matrix_runner._prepare_unfrozen_pilot_plan(
         all_rows=rows,
-        selected_rows=rows[:1],
+        selected_rows=rows,
         config_dir=config_dir,
         protocol_path=unfrozen_protocol_path,
         protocol_hash="protocol-hash",
@@ -126,6 +181,114 @@ def test_pilot_plan_uses_portable_paths_and_trainer_revalidates(
             output_dir_was_explicit=True,
         )
 
+
+def test_pilot_plan_rejects_partial_condition_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unfrozen_protocol_path: Path,
+) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    rows: list[dict[str, str]] = []
+    for condition in ("C1", "C2", "C3", "C4"):
+        path = config_dir / f"{condition}.yaml"
+        path.write_text(condition, encoding="utf-8")
+        rows.append(
+            {
+                "experiment": "E1",
+                "dataset": "cifar100",
+                "depth": "20",
+                "time_steps": "6",
+                "seed": "77",
+                "condition": condition,
+                "run_id": f"run-{condition}",
+                "config_file": path.name,
+            }
+        )
+
+
+def test_v2_pilot_launch_contract_uses_only_protocol_bound_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_path = ROOT / "configs" / "protocol_v2_pilot.yaml"
+    protocol = load_protocol(protocol_path)
+    with (
+        ROOT / "configs" / "v2_pilot_generated" / "run_manifest.csv"
+    ).open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    health_report = {
+        "status": "PASS",
+        "acceptance_hash": "acceptance-hash",
+        "git_commit": "a" * 40,
+    }
+    monkeypatch.setattr(
+        matrix_runner,
+        "validate_pilot_health_report",
+        lambda *args, **kwargs: health_report,
+    )
+
+    output, plan, health, observed = matrix_runner._validate_v2_pilot_launch_contract(
+        protocol=protocol,
+        protocol_path=protocol_path,
+        selected_rows=rows,
+        output_root=None,
+        pilot_plan=None,
+    )
+
+    acceptance = protocol["pilot_acceptance"]
+    assert output == (ROOT / acceptance["pilot_output_root"]).resolve()
+    assert plan == (ROOT / acceptance["pilot_plan"]).resolve()
+    assert health == (ROOT / acceptance["health_output"]).resolve()
+    assert observed is health_report
+    matrix_manifest = json.loads(
+        (
+            ROOT / "configs" / "v2_pilot_generated" / "matrix_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    matrix_runner._validate_v2_generated_matrix(
+        protocol=protocol,
+        protocol_path=protocol_path,
+        config_dir=ROOT / "configs" / "v2_pilot_generated",
+        manifest_rows=rows,
+        matrix_manifest=matrix_manifest,
+    )
+
+    tampered_dir = tmp_path / "v2_pilot_generated"
+    shutil.copytree(ROOT / "configs" / "v2_pilot_generated", tampered_dir)
+    tampered_path = tampered_dir / rows[0]["config_file"]
+    tampered = yaml.safe_load(tampered_path.read_text(encoding="utf-8"))
+    tampered["runtime"]["log_every"] = 99
+    tampered_path.write_text(
+        yaml.safe_dump(tampered, sort_keys=False), encoding="utf-8"
+    )
+    tampered_rows = [dict(row) for row in rows]
+    tampered_rows[0]["config_file_sha256"] = sha256_file(tampered_path)
+    with pytest.raises(RuntimeError, match="in-memory protocol matrix"):
+        matrix_runner._validate_v2_generated_matrix(
+            protocol=protocol,
+            protocol_path=protocol_path,
+            config_dir=tampered_dir,
+            manifest_rows=tampered_rows,
+            matrix_manifest=matrix_manifest,
+        )
+
+    with pytest.raises(ValueError, match="complete four-run"):
+        matrix_runner._validate_v2_pilot_launch_contract(
+            protocol=protocol,
+            protocol_path=protocol_path,
+            selected_rows=rows[:3],
+            output_root=None,
+            pilot_plan=None,
+        )
+    with pytest.raises(ValueError, match="cannot override"):
+        matrix_runner._validate_v2_pilot_launch_contract(
+            protocol=protocol,
+            protocol_path=protocol_path,
+            selected_rows=rows,
+            output_root="results/pilot/changed",
+            pilot_plan=None,
+        )
 
 def test_matrix_continuation_preserves_attempts_and_skips_complete(tmp_path: Path) -> None:
     assert matrix_runner._project_path("results/runs").is_absolute()
