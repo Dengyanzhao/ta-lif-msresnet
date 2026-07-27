@@ -113,9 +113,9 @@ class _HistoryWindowSelect(torch.autograd.Function):
     deterministic algorithms that path can be prohibitively slow for dense
     feature maps and tiny TA-LIF banks.  The derivative with respect to bank
     entry ``k`` is simply the sum of output gradients whose index is ``k``.
-    Multiplying the output gradients by a fixed-order indicator basis computes
-    all of those sums without indexed gradient writes while preserving the
-    exact mathematical operation.
+    Reducing one masked gradient tensor per bank slot avoids indexed writes and
+    the large ``N x bank_size`` indicator matrix while preserving the exact
+    mathematical operation and a deterministic reduction path.
     """
 
     @staticmethod
@@ -137,21 +137,20 @@ class _HistoryWindowSelect(torch.autograd.Function):
     ) -> Tuple[Optional[Tensor], Optional[Tensor], None]:
         (index,) = ctx.saved_tensors
         flat_index = index.reshape(-1)
-        reference = grad_v1 if grad_v1 is not None else grad_v2
-        if reference is None:
-            return None, None, None
-        slots = torch.arange(ctx.bank_size, device=index.device)
-        indicator = (flat_index.unsqueeze(1) == slots.unsqueeze(0)).to(dtype=reference.dtype)
 
-        if grad_v1 is None:
-            reduced_v2 = grad_v2.reshape(1, -1).matmul(indicator).squeeze(0)
-            return None, reduced_v2, None
-        if grad_v2 is None:
-            reduced_v1 = grad_v1.reshape(1, -1).matmul(indicator).squeeze(0)
-            return reduced_v1, None, None
+        def reduce_gradient(gradient: Optional[Tensor]) -> Optional[Tensor]:
+            if gradient is None:
+                return None
+            flat_gradient = gradient.reshape(-1)
+            zero = torch.zeros((), device=gradient.device, dtype=gradient.dtype)
+            return torch.stack(
+                [
+                    torch.where(flat_index == slot, flat_gradient, zero).sum()
+                    for slot in range(ctx.bank_size)
+                ]
+            )
 
-        gradients = torch.stack((grad_v1.reshape(-1), grad_v2.reshape(-1))).matmul(indicator)
-        return gradients[0], gradients[1], None
+        return reduce_gradient(grad_v1), reduce_gradient(grad_v2), None
 
 
 def _select_history_windows(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare deterministic TA history-gradient reductions on the target GPU.
+"""Compare legacy and production TA history-gradient reductions on the target GPU.
 
 This is a non-reporting engineering diagnostic. It monkeypatches the history
 selector in memory, uses one fixed real CIFAR-100 batch, prints one JSON report
@@ -37,8 +37,8 @@ ARTIFACT_CLASS = "NON_REPORTING_TA_HISTORY_REDUCTION_BENCHMARK"
 Selector = Callable[[Tensor, Tensor, Tensor], Tuple[Tensor, Tensor]]
 
 
-class _MaskedWhereHistoryWindowSelect(torch.autograd.Function):
-    """Use fixed-order per-slot reductions instead of an N-by-bank indicator."""
+class _LegacyIndicatorMatmulHistoryWindowSelect(torch.autograd.Function):
+    """Preserve the pre-optimization reduction for engineering comparison."""
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -59,28 +59,29 @@ class _MaskedWhereHistoryWindowSelect(torch.autograd.Function):
     ) -> Tuple[Optional[Tensor], Optional[Tensor], None]:
         (index,) = ctx.saved_tensors
         flat_index = index.reshape(-1)
+        reference = grad_v1 if grad_v1 is not None else grad_v2
+        if reference is None:
+            return None, None, None
+        slots = torch.arange(ctx.bank_size, device=index.device)
+        indicator = (flat_index.unsqueeze(1) == slots.unsqueeze(0)).to(dtype=reference.dtype)
 
-        def reduce_gradient(gradient: Optional[Tensor]) -> Optional[Tensor]:
-            if gradient is None:
-                return None
-            flat_gradient = gradient.reshape(-1)
-            zero = torch.zeros((), device=gradient.device, dtype=gradient.dtype)
-            return torch.stack(
-                [
-                    torch.where(flat_index == slot, flat_gradient, zero).sum()
-                    for slot in range(ctx.bank_size)
-                ]
-            )
+        if grad_v1 is None:
+            reduced_v2 = grad_v2.reshape(1, -1).matmul(indicator).squeeze(0)
+            return None, reduced_v2, None
+        if grad_v2 is None:
+            reduced_v1 = grad_v1.reshape(1, -1).matmul(indicator).squeeze(0)
+            return reduced_v1, None, None
 
-        return reduce_gradient(grad_v1), reduce_gradient(grad_v2), None
+        gradients = torch.stack((grad_v1.reshape(-1), grad_v2.reshape(-1))).matmul(indicator)
+        return gradients[0], gradients[1], None
 
 
-def masked_where_select(
+def legacy_indicator_matmul_select(
     bank_v1: Tensor,
     bank_v2: Tensor,
     index: Tensor,
 ) -> Tuple[Tensor, Tensor]:
-    return _MaskedWhereHistoryWindowSelect.apply(bank_v1, bank_v2, index)
+    return _LegacyIndicatorMatmulHistoryWindowSelect.apply(bank_v1, bank_v2, index)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -289,8 +290,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     candidates: dict[str, Any] = {}
     selectors: tuple[tuple[str, Selector], ...] = (
-        ("repository_indicator_matmul", neurons._select_history_windows),
-        ("fixed_order_masked_where_sum", masked_where_select),
+        ("legacy_indicator_matmul", legacy_indicator_matmul_select),
+        ("repository_fixed_order_masked_where_sum", neurons._select_history_windows),
     )
     for name, selector in selectors:
         try:
@@ -349,10 +350,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     print(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False))
 
-    current = candidates.get("repository_indicator_matmul", {})
-    proposed = candidates.get("fixed_order_masked_where_sum", {})
-    diagnostic_ok = current.get("correctness", {}).get("pass") is True and (
-        proposed.get("correctness", {}).get("pass") is True
+    legacy = candidates.get("legacy_indicator_matmul", {})
+    production = candidates.get("repository_fixed_order_masked_where_sum", {})
+    diagnostic_ok = legacy.get("correctness", {}).get("pass") is True and (
+        production.get("correctness", {}).get("pass") is True
     )
     marker = (
         "TA_HISTORY_REDUCTION_BENCHMARK_PASS"

@@ -71,6 +71,111 @@ def test_history_window_selection_leaves_unused_bank_entries_at_zero() -> None:
     assert torch.equal(bank_v2.grad, torch.tensor([6.0, 0.0, 6.0, 0.0, 0.0]))
 
 
+@pytest.mark.parametrize("selected_output", [0, 1])
+def test_history_window_selection_supports_one_sided_output_gradients(
+    selected_output: int,
+) -> None:
+    index = torch.tensor([[0, 2, 2], [3, 0, 2]])
+    banks = (
+        torch.tensor([-1.0, -0.25, 0.5, 1.25], requires_grad=True),
+        torch.tensor([0.0, 0.75, 1.5, 2.25], requires_grad=True),
+    )
+
+    selected = neurons._select_history_windows(*banks, index)
+    selected[selected_output].sum().backward()
+
+    expected = torch.tensor([2.0, 0.0, 3.0, 1.0])
+    assert torch.equal(banks[selected_output].grad, expected)
+    assert torch.equal(banks[1 - selected_output].grad, torch.zeros(4))
+
+
+def test_history_window_selection_backward_does_not_use_matrix_multiply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_matmul(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("history reduction must not use matrix multiplication")
+
+    monkeypatch.setattr(torch.Tensor, "matmul", reject_matmul)
+    bank_v1 = torch.arange(6.0, requires_grad=True)
+    bank_v2 = torch.arange(6.0, 12.0, requires_grad=True)
+    index = torch.tensor([[0, 1, 1, 5], [3, 2, 5, 0]])
+
+    selected_v1, selected_v2 = neurons._select_history_windows(bank_v1, bank_v2, index)
+    (selected_v1.sum() + selected_v2.sum()).backward()
+
+    expected = torch.tensor([2.0, 2.0, 1.0, 1.0, 0.0, 2.0])
+    assert torch.equal(bank_v1.grad, expected)
+    assert torch.equal(bank_v2.grad, expected)
+
+
+@pytest.mark.parametrize(
+    ("bank_size", "index"),
+    [
+        (1, torch.tensor([[0, 0], [0, 0]])),
+        (6, torch.tensor([[0, 5, 5], [2, 0, 3]])),
+        (10, torch.tensor([[9, 0, 4], [4, 8, 0]])),
+    ],
+)
+def test_history_window_selection_matches_direct_indexing_across_bank_sizes(
+    bank_size: int,
+    index: "torch.Tensor",
+) -> None:
+    weights = torch.linspace(-1.25, 2.0, index.numel(), dtype=torch.float64).reshape(index.shape)
+    direct_bank = torch.linspace(-0.75, 1.5, bank_size, dtype=torch.float64, requires_grad=True)
+    optimized_bank = direct_bank.detach().clone().requires_grad_()
+
+    direct = direct_bank[index]
+    optimized, _ = neurons._select_history_windows(
+        optimized_bank,
+        torch.zeros_like(optimized_bank, requires_grad=True),
+        index,
+    )
+    direct_gradient = torch.autograd.grad((direct * weights).sum(), direct_bank)[0]
+    optimized_gradient = torch.autograd.grad(
+        (optimized * weights).sum(),
+        optimized_bank,
+    )[0]
+
+    assert torch.equal(optimized, direct)
+    assert torch.equal(optimized_gradient, direct_gradient)
+
+
+def test_history_window_selection_supports_empty_index() -> None:
+    bank_v1 = torch.arange(6.0, requires_grad=True)
+    bank_v2 = torch.arange(6.0, 12.0, requires_grad=True)
+    index = torch.empty((0, 3), dtype=torch.long)
+
+    selected_v1, selected_v2 = neurons._select_history_windows(bank_v1, bank_v2, index)
+    (selected_v1.sum() + selected_v2.sum()).backward()
+
+    assert selected_v1.shape == index.shape
+    assert selected_v2.shape == index.shape
+    assert torch.equal(bank_v1.grad, torch.zeros(6))
+    assert torch.equal(bank_v2.grad, torch.zeros(6))
+
+
+def test_history_window_selection_supports_noncontiguous_grad_output() -> None:
+    bank = torch.linspace(-1.0, 1.0, 6, dtype=torch.float64, requires_grad=True)
+    index = torch.tensor([[0, 5], [2, 0], [5, 3]])
+    grad_output = torch.linspace(-2.0, 1.0, 6, dtype=torch.float64).reshape(2, 3).T
+    assert not grad_output.is_contiguous()
+
+    selected, _ = neurons._select_history_windows(
+        bank,
+        torch.zeros_like(bank, requires_grad=True),
+        index,
+    )
+    actual = torch.autograd.grad(selected, bank, grad_outputs=grad_output)[0]
+
+    direct_bank = bank.detach().clone().requires_grad_()
+    expected = torch.autograd.grad(
+        direct_bank[index],
+        direct_bank,
+        grad_outputs=grad_output,
+    )[0]
+    assert torch.equal(actual, expected)
+
+
 def test_history_window_selection_is_repeatable_with_strict_determinism() -> None:
     was_deterministic = torch.are_deterministic_algorithms_enabled()
     try:
@@ -102,6 +207,20 @@ def test_history_window_selection_passes_double_precision_gradcheck() -> None:
     bank_v2 = torch.tensor([0.25, 1.1, 1.9], dtype=torch.float64, requires_grad=True)
 
     assert torch.autograd.gradcheck(
+        lambda first, second: neurons._select_history_windows(first, second, index),
+        (bank_v1, bank_v2),
+        eps=1e-6,
+        atol=1e-5,
+        rtol=1e-3,
+    )
+
+
+def test_history_window_selection_passes_double_precision_gradgradcheck() -> None:
+    index = torch.tensor([[0, 2, 1], [2, 2, 0]], dtype=torch.long)
+    bank_v1 = torch.tensor([-0.75, 0.1, 0.9], dtype=torch.float64, requires_grad=True)
+    bank_v2 = torch.tensor([0.25, 1.1, 1.9], dtype=torch.float64, requires_grad=True)
+
+    assert torch.autograd.gradgradcheck(
         lambda first, second: neurons._select_history_windows(first, second, index),
         (bank_v1, bank_v2),
         eps=1e-6,
