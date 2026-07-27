@@ -91,7 +91,7 @@ def generate(protocol_path: str | Path, output_dir: str | Path) -> list[dict[str
     fields = list(rows[0])
     manifest_csv = output_dir / "run_manifest.csv"
     with manifest_csv.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     atomic_write_json(output_dir / "matrix_manifest.json", {

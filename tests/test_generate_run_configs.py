@@ -33,6 +33,8 @@ def test_v2_pilot_generation_is_one_ordered_c1_c4_seed_block(tmp_path: Path) -> 
 
     runs = generate(ROOT / "configs" / "protocol_v2_pilot.yaml", output)
     manifest = json.loads((output / "matrix_manifest.json").read_text(encoding="utf-8"))
+    csv_path = output / "run_manifest.csv"
+    csv_bytes = csv_path.read_bytes()
 
     assert len(runs) == 4
     assert manifest["run_count"] == 4
@@ -40,3 +42,9 @@ def test_v2_pilot_generation_is_one_ordered_c1_c4_seed_block(tmp_path: Path) -> 
     assert [run["condition"] for run in runs] == ["C1", "C2", "C3", "C4"]
     assert len(list(output.glob("*.yaml"))) == 4
     assert manifest["protocol"] == "configs/protocol_v2_pilot.yaml"
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" not in csv_bytes
+    assert csv_bytes.count(b"\n") == 5
+
+    generate(ROOT / "configs" / "protocol_v2_pilot.yaml", output)
+    assert csv_path.read_bytes() == csv_bytes
