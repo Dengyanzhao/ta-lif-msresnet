@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -25,6 +27,13 @@ from .freeze import FreezeGateError, verify_formal_freeze
 from .models import build_model
 from .preflight import check_protocol
 from .pathing import artifact_path_reference
+from .pilot_v3 import (
+    PilotV3Error,
+    expected_pilot_plan_payload,
+    require_v3_author_freeze,
+    resolve_pilot_block,
+    validate_health_report as validate_v3_health_report,
+)
 from .utils import (
     AverageMeter,
     JSONLLogger,
@@ -923,28 +932,56 @@ def _validate_orchestrator_pilot_plan(
     """Revalidate the runner-created global pilot plan inside the trainer."""
 
     resolved_plan = plan_path.resolve()
-    default_plan = PILOT_PLAN_PATH.resolve()
-    if resolved_plan != default_plan and (
-        resolved_plan.parent != default_plan.parent
-        or not resolved_plan.name.startswith("unfrozen_pilot_plan_")
-        or resolved_plan.suffix.lower() != ".json"
-    ):
-        raise ValueError(
-            "Pilot plan must use the default audited path or a versioned "
-            "unfrozen_pilot_plan_*.json sibling"
-        )
     payload = json.loads(plan_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("Pilot plan must be a mapping")
-    if payload.get("version") not in {1, 2} or payload.get("non_reportable") is not True:
-        raise ValueError("Pilot plan is not a recognized non-reportable plan")
+    protocol = load_protocol(protocol_path)
+    is_v3_pilot = (
+        protocol.get("protocol_version") == 3
+        and protocol.get("study_stage") == "pilot_and_formal"
+    )
+    if is_v3_pilot:
+        try:
+            v3_block = resolve_pilot_block(
+                protocol,
+                str(payload.get("dataset", "")),
+                repository_root=PROJECT_ROOT,
+            )
+        except PilotV3Error as exc:
+            raise ValueError(f"Pilot plan does not identify a valid v3 block: {exc}") from exc
+        if resolved_plan != v3_block.pilot_plan:
+            raise ValueError("Protocol v3 pilot plan path differs from the dataset binding")
+        if (
+            payload.get("version") != 3
+            or payload.get("artifact_class") != "NON_REPORTABLE_V3_PILOT_PLAN"
+            or payload.get("non_reportable") is not True
+        ):
+            raise ValueError("Pilot plan is not a recognized v3 non-reportable plan")
+    else:
+        v3_block = None
+        default_plan = PILOT_PLAN_PATH.resolve()
+        if resolved_plan != default_plan and (
+            resolved_plan.parent != default_plan.parent
+            or not resolved_plan.name.startswith("unfrozen_pilot_plan_")
+            or resolved_plan.suffix.lower() != ".json"
+        ):
+            raise ValueError(
+                "Pilot plan must use the default audited path or a versioned "
+                "unfrozen_pilot_plan_*.json sibling"
+            )
+        if payload.get("version") not in {1, 2} or payload.get("non_reportable") is not True:
+            raise ValueError("Pilot plan is not a recognized non-reportable plan")
     if payload.get("protocol_hash") != protocol_hash:
         raise ValueError("Pilot plan protocol hash differs from the current protocol")
     if payload.get("protocol_path") != artifact_path_reference(protocol_path, PROJECT_ROOT):
         raise ValueError("Pilot plan protocol path differs from the requested protocol")
-    protocol = load_protocol(protocol_path)
-    if protocol.get("protocol_status", {}).get("frozen") is True:
-        raise ValueError("A frozen protocol cannot use the unfrozen pilot plan")
+    if is_v3_pilot:
+        try:
+            require_v3_author_freeze(protocol, repository_root=PROJECT_ROOT)
+        except PilotV3Error as exc:
+            raise ValueError(f"Protocol v3 pilot requires author freeze: {exc}") from exc
+    elif protocol.get("protocol_status", {}).get("frozen") is True:
+        raise ValueError("A frozen protocol cannot use the legacy unfrozen pilot plan")
     is_v2_pilot = (
         protocol.get("protocol_version") == 2
         and protocol.get("study_stage") == "pilot"
@@ -988,6 +1025,67 @@ def _validate_orchestrator_pilot_plan(
         )
         if status.returncode != 0 or status.stdout.strip():
             raise ValueError("The tracked worktree changed after the pilot health gate")
+    elif is_v3_pilot:
+        assert v3_block is not None
+        try:
+            health_report = validate_v3_health_report(
+                v3_block.health_output,
+                protocol_path,
+                v3_block.dataset,
+                repository_root=PROJECT_ROOT,
+                require_current_tracked_clean=True,
+            )
+        except PilotV3Error as exc:
+            raise ValueError(f"V3 pilot health report is invalid: {exc}") from exc
+        manifest_path = Path(config_path).resolve().parent / "run_manifest.csv"
+        try:
+            with manifest_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                manifest_rows = list(csv.DictReader(handle))
+        except (OSError, UnicodeError, csv.Error) as exc:
+            raise ValueError(f"Cannot read the v3 pilot run manifest: {exc}") from exc
+        expected_plan = expected_pilot_plan_payload(
+            block=v3_block,
+            protocol_path=protocol_path,
+            config_dir=Path(config_path).resolve().parent,
+            manifest_rows=manifest_rows,
+            health_report=health_report,
+            repository_root=PROJECT_ROOT,
+        )
+        if dict(payload) != expected_plan:
+            raise ValueError("V3 pilot plan differs from the protocol-bound dataset block")
+        if config.data.dataset != v3_block.dataset or config.runtime.seed != v3_block.seed:
+            raise ValueError("Current run dataset/seed differs from the v3 pilot plan")
+        tool_path = PROJECT_ROOT / "scripts" / "pilot_health_gate_v3.py"
+        scripts_root = str(tool_path.parent)
+        if scripts_root not in sys.path:
+            sys.path.insert(0, scripts_root)
+        spec = importlib.util.spec_from_file_location(
+            "talif_v3_runtime_health_gate", tool_path
+        )
+        if spec is None or spec.loader is None:
+            raise ValueError("Cannot load the v3 runtime health validator")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reference_config = load_run_config(
+            Path(config_path).resolve().parent
+            / next(
+                row["config_file"]
+                for row in manifest_rows
+                if row.get("dataset") == v3_block.dataset
+                and row.get("condition") == "C1"
+            ),
+            protocol_path,
+        )
+        try:
+            v3_runtime_context = module.validate_current_runtime_against_health_report(
+                health_report,
+                protocol=protocol,
+                reference_config=reference_config,
+                block=v3_block,
+                device=config.runtime.device,
+            )
+        except PilotV3Error as exc:
+            raise ValueError(f"V3 pilot runtime/data context is invalid: {exc}") from exc
     if not output_dir_was_explicit:
         raise ValueError("Pilot execution requires an explicit orchestrator output directory")
     protocol_output_root = protocol.get("output_root", "results")
@@ -1004,11 +1102,17 @@ def _validate_orchestrator_pilot_plan(
     if pilot_root == formal_root or formal_root in pilot_root.parents or pilot_root in formal_root.parents:
         raise ValueError("Pilot and formal output roots are not isolated")
     runs = payload.get("runs")
-    if not isinstance(runs, list) or len(runs) != 4:
-        raise ValueError("Pilot plan must contain exactly four C1-C4 runs")
+    expected_conditions = {"C1", "C2"} if is_v3_pilot else {"C1", "C2", "C3", "C4"}
+    expected_run_count = len(expected_conditions)
+    if not isinstance(runs, list) or len(runs) != expected_run_count:
+        raise ValueError(
+            f"Pilot plan must contain exactly {expected_run_count} authorized runs"
+        )
     conditions = {str(run.get("condition")) for run in runs if isinstance(run, Mapping)}
-    if conditions != {"C1", "C2", "C3", "C4"}:
-        raise ValueError("Pilot plan conditions must be exactly C1-C4")
+    if conditions != expected_conditions:
+        raise ValueError(
+            "Pilot plan conditions must be exactly " + ",".join(sorted(expected_conditions))
+        )
     matches = [
         run
         for run in runs
@@ -1036,6 +1140,20 @@ def _validate_orchestrator_pilot_plan(
                 "git_commit": payload.get("git_commit"),
                 "health_report": payload.get("health_report"),
                 "health_report_sha256": payload.get("health_report_sha256"),
+            }
+        )
+    elif is_v3_pilot:
+        evidence.update(
+            {
+                "acceptance_hash": payload.get("acceptance_hash"),
+                "block_hash": payload.get("block_hash"),
+                "dataset": payload.get("dataset"),
+                "git_commit": payload.get("git_commit"),
+                "health_report": payload.get("health_report"),
+                "health_report_sha256": payload.get("health_report_sha256"),
+                "attempt_receipt": payload.get("attempt_receipt"),
+                "attempt_receipt_sha256": payload.get("attempt_receipt_sha256"),
+                "runtime_context": v3_runtime_context,
             }
         )
     return evidence
@@ -1071,6 +1189,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     pilot_active = args.orchestrator_pilot_plan is not None
     if pilot_active and args.dry_run:
         raise SystemExit("The orchestrator pilot plan cannot be used for a dry run")
+    protocol = load_protocol(args.protocol)
+    if int(protocol.get("protocol_version", 1)) == 3 and args.dry_run:
+        raise SystemExit(
+            "Protocol v3 training dry-runs are disabled; use generate_run_configs.py "
+            "--dry-run and reserve training commands for the author-frozen health/pilot gates"
+        )
     report = check_protocol(
         args.protocol,
         mode="smoke" if args.dry_run else ("pilot" if pilot_active else "full"),
@@ -1091,6 +1215,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = _override_config(load_run_config(args.config, args.protocol), args)
     if config.analysis.get("protocol_hash") != report.protocol_hash:
         raise SystemExit("Run config protocol hash is stale; regenerate configs from the current protocol")
+    if (
+        int(protocol.get("protocol_version", 1)) == 3
+        and not args.dry_run
+        and not pilot_active
+    ):
+        expected_output = Path(str(protocol["output_root"]))
+        if not expected_output.is_absolute():
+            expected_output = PROJECT_ROOT / expected_output
+        if Path(config.runtime.output_dir).resolve() != expected_output.resolve():
+            raise SystemExit(
+                "Protocol v3 formal training must use its isolated output_root"
+            )
     orchestrator_evidence: dict[str, Any] | None = None
     if args.orchestrator_pilot_plan is not None:
         try:

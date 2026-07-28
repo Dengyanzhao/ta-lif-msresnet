@@ -174,6 +174,212 @@ V2_PILOT_PROFILE_CONTRACTS: Tuple[
         V2R2_PILOT_ACCEPTANCE,
     ),
 )
+
+# Protocol v3 is an isolated TA-LIF-only study profile.  The repository-wide
+# C1--C4 constants above remain unchanged so historical protocols and evidence
+# continue to validate exactly as they did before the manuscript scope change.
+V3_ACTIVE_CONDITIONS: Tuple[str, ...] = ("C1", "C2")
+V3_FORMAL_SEEDS: Tuple[int, ...] = (
+    1882214332,
+    836017246,
+    126468528,
+    2075015328,
+    419442269,
+)
+V3_RETIRED_SEEDS = frozenset({11, 22, 33, 44, 55, 77, 88, 314159})
+V3_PRIMARY_GROUPS: Tuple[Tuple[str, str, int, int], ...] = (
+    ("E1", "cifar100", 20, 6),
+    ("E1", "cifar10dvs", 20, 10),
+)
+V3_OUTPUT_ROOT = "results/formal_v3_talif_only"
+V3_ARTIFACT_PATHS: Dict[str, str] = {
+    "protocol": "configs/protocol_v3_talif_only.yaml",
+    "signoff": "PREREGISTRATION_SIGNOFF_V3_TALIF_ONLY.md",
+    "formal_matrix": "configs/v3_talif_only_generated",
+    "pilot_matrix": "configs/v3_talif_only_pilot_generated",
+    "freeze_manifest": "FREEZE_MANIFEST_V3_TALIF_ONLY.json",
+    "formal_results": V3_OUTPUT_ROOT,
+    "pilot_results": "results/pilot/v3_talif_only",
+    "analysis_results": "results/analysis/v3_talif_only",
+}
+V3_PROTOCOL_CONFIRMATION_FIELDS: Tuple[str, ...] = (
+    "talif_only_scope_and_legacy_preservation",
+    "reference_implementation_reviewed",
+    "neuron_parameters",
+    "data_preprocessing_and_splits",
+    "optimizer_schedule_and_pilot_gates",
+    "paired_accuracy_analysis_and_claim_gates",
+    "deterministic_seeds_and_run_handling",
+    "model_selection_and_one_time_test_access",
+)
+V3_PILOT_ACCEPTANCE: Dict[str, Any] = {
+    "identity": "v3_talif_only_c1_c2_e120",
+    "artifact_class": "non_reportable_pilot",
+    "conditions": ["C1", "C2"],
+    "datasets": {
+        "cifar100": {
+            "seed": 474123945,
+            "health_output": (
+                "results/pilot/v3_talif_only/health_cifar100_s474123945.json"
+            ),
+            "attempt_receipt": (
+                "results/pilot/v3_talif_only/health_cifar100_s474123945.attempt.json"
+            ),
+            "pilot_output_root": (
+                "results/pilot/v3_talif_only/cifar100_s474123945"
+            ),
+            "pilot_plan": (
+                "environment/v3_talif_only_pilot_cifar100_s474123945.json"
+            ),
+        },
+        "cifar10dvs": {
+            "seed": 799312121,
+            "health_output": (
+                "results/pilot/v3_talif_only/health_cifar10dvs_s799312121.json"
+            ),
+            "attempt_receipt": (
+                "results/pilot/v3_talif_only/health_cifar10dvs_s799312121.attempt.json"
+            ),
+            "pilot_output_root": (
+                "results/pilot/v3_talif_only/cifar10dvs_s799312121"
+            ),
+            "pilot_plan": (
+                "environment/v3_talif_only_pilot_cifar10dvs_s799312121.json"
+            ),
+        },
+    },
+    "validation_output": "results/pilot/v3_talif_only/validation.json",
+    "environment": {
+        "expected_gpu_substring": "RTX 5090",
+        "pytorch_version": "2.9.1+cu128",
+        "cuda_runtime": "12.8",
+        "precision": "float32",
+        "deterministic": True,
+    },
+    "overfit": {
+        "batch_size": 8,
+        "steps": 80,
+        "minimum_accuracy": 0.50,
+        "maximum_loss_fraction": 0.90,
+        "minimum_ta_routed_gradient_coverage": 0.90,
+    },
+    "timing": {
+        "batch_size": 64,
+        "warmup_steps": 2,
+        "timed_steps": 5,
+        "maximum_ta_enabled_over_frozen_ratio": 3.0,
+        "epoch_time_ratio_conditions": ["C2"],
+        "ta_state_source": "events_jsonl_epoch_completed_ta_enabled",
+    },
+    "schedule": {
+        "epochs": 120,
+        "required_best_validation_accuracy": 0.60,
+        "require_all_conditions_converged": True,
+        "technical_interruption_policy": (
+            "same_environment_last_checkpoint_resume_permitted"
+        ),
+        "cross_environment_resume": "forbidden",
+        "failed_or_interrupted_fresh_retry": "forbidden",
+        "failure_action": "new_protocol_version_and_new_unused_seed",
+    },
+}
+V3_ANALYSIS_CONTRACT: Dict[str, Any] = {
+    "collect_activity": False,
+    "accuracy_scale": "proportion",
+    "validation_accuracy_thresholds": {
+        "cifar100": 0.60,
+        "cifar10dvs": 0.60,
+    },
+    "convergence_epoch_rule": "first_validation_epoch_at_or_above_threshold",
+    "nonconvergence_rule": "not_reached_by_final_epoch_no_exclusion",
+    "failure_rule": (
+        "nonfinite_loss_missing_best_checkpoint_or_unsuccessful_process_blocks_complete_pair"
+    ),
+    "alpha": 0.05,
+    "confidence_level": 0.95,
+    "primary_dataset": "cifar100",
+    "replication_dataset": "cifar10dvs",
+    "primary_accuracy_test": {
+        "estimand": "mean_seed_paired_c2_minus_c1_test_accuracy_pp",
+        "blocking_factor": "seed",
+        "test_statistic": "one_sample_t_over_seed_level_differences",
+        "null_hypothesis": "mean_delta_le_0",
+        "alternative_hypothesis": "mean_delta_gt_0",
+        "sidedness": "one_sided_greater",
+        "estimation_interval": "two_sided_95_percent_t",
+        "degrees_of_freedom": 4,
+        "decision_rule": "p_lt_0_05_and_mean_delta_gt_0",
+        "normality_pretest_switch": "forbidden",
+        "zero_variance_rule": "not_estimable_primary_inconclusive",
+    },
+    "replication_analysis": {
+        "method": "same_paired_t_estimate_interval_and_raw_differences",
+        "role": "prespecified_replication_external_validity_not_confirmatory",
+        "cross_dataset_multiplicity": "none_single_confirmatory_primary",
+        "cannot_rescue_primary": True,
+    },
+    "sign_flip": {
+        "assignments": 32,
+        "enumeration": "all_2_power_5_seed_level_sign_flips",
+        "sidedness": "one_sided_greater",
+        "role": "sensitivity_only_cannot_rescue_primary",
+    },
+    "bootstrap": {
+        "resamples": 10000,
+        "resampling_unit": "complete_seed_pair",
+        "cellwise_resampling": "forbidden",
+        "rng": "numpy_generator_pcg64",
+        "index_draw": "integers_0_5_size_10000_by_5_endpoint_false",
+        "statistic": "mean_seed_paired_c2_minus_c1_test_accuracy_pp",
+        "interval": "two_sided_95_percent_percentile",
+        "quantile_method": "linear",
+        "seeds": {
+            "cifar100": 1033863572,
+            "cifar10dvs": 1367073951,
+        },
+        "role": "sensitivity_only_cannot_rescue_primary",
+    },
+    "model_selection": {
+        "checkpoint": "best.pt",
+        "primary_order": "maximum_validation_accuracy",
+        "first_tie_breaker": "minimum_validation_loss",
+        "exact_tie_breaker": "earliest_epoch",
+        "test_based_selection": "forbidden",
+    },
+    "test_access": {
+        "training_config_final_test": False,
+        "when": "after_all_20_runs_and_best_checkpoints_pass_frozen_audit",
+        "access_count_per_checkpoint": 1,
+        "reselection_or_repeated_evaluation": "forbidden",
+        "ambiguous_interruption": "stop_document_and_obtain_author_decision",
+    },
+    "run_handling": {
+        "pilot_in_reportable_analysis": "forbidden",
+        "failed_run_records": "retain",
+        "seed_substitution": "forbidden",
+        "outlier_exclusion": "forbidden",
+        "nonconvergence_excludes_run": False,
+        "incomplete_seed_pair": "unresolved_no_partial_analysis",
+        "cross_environment_checkpoint_resume": "forbidden",
+        "protocol_change_after_first_reportable_run": "forbidden",
+    },
+    "wording_gates": {
+        "cifar100_improved": "primary_p_lt_0_05_and_mean_delta_gt_0",
+        "primary_not_passed": "inconclusive_no_equivalence_or_no_effect_claim",
+        "dvs_cannot_rescue_primary": True,
+        "dvs_directional_support": "mean_delta_gt_0",
+        "dvs_replication_claim": "one_sided_p_lt_0_05_and_mean_delta_gt_0",
+        "cross_domain_improvement": "both_dataset_tests_pass_and_both_means_gt_0",
+    },
+    "efficiency": {
+        "role": "descriptive_only",
+        "contrast": "C2_over_C1_paired_within_seed",
+        "metrics": ["training_time", "cuda_latency", "peak_memory"],
+        "confidence_interval": "paired_two_sided_95_percent_t_on_log_ratio",
+        "homogeneous_environment_required": True,
+        "energy": "not_assessed",
+    },
+}
 EXPECTED_RUN_COUNT = (
     len(PRESPECIFIED_PRIMARY_GROUPS) * len(SUPPORTED_CONDITIONS) * len(PRESPECIFIED_SEEDS)
 )
@@ -403,6 +609,61 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def active_conditions_for_protocol(protocol: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Return the ordered condition set without changing legacy global support."""
+
+    if int(protocol.get("protocol_version", 1)) == 3:
+        values = protocol.get("active_conditions", ())
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            raise ConfigError("active_conditions must be a sequence")
+        return tuple(str(value) for value in values)
+    return SUPPORTED_CONDITIONS
+
+
+def confirmation_fields_for_protocol(protocol: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Return the human approval checklist bound to a protocol generation."""
+
+    return (
+        V3_PROTOCOL_CONFIRMATION_FIELDS
+        if int(protocol.get("protocol_version", 1)) == 3
+        else PROTOCOL_CONFIRMATION_FIELDS
+    )
+
+
+def artifact_paths_for_protocol(protocol: Mapping[str, Any]) -> Dict[str, str]:
+    """Resolve isolated v3 artifacts while preserving legacy path defaults."""
+
+    if int(protocol.get("protocol_version", 1)) == 3:
+        value = protocol.get("artifact_paths")
+        if not isinstance(value, Mapping):
+            raise ConfigError("protocol.artifact_paths must be a mapping for v3")
+        return {str(key): str(path) for key, path in value.items()}
+    return {
+        "protocol": "configs/protocol.yaml",
+        "signoff": "PREREGISTRATION_SIGNOFF.md",
+        "formal_matrix": "configs/generated",
+        "freeze_manifest": "FREEZE_MANIFEST.json",
+        "formal_results": str(protocol.get("output_root", "results/runs")),
+    }
+
+
+def expected_run_count_for_protocol(protocol: Mapping[str, Any]) -> int:
+    """Return the exact matrix size derived from slots, seeds, and active cells."""
+
+    matrix = protocol.get("matrix", {})
+    if not isinstance(matrix, Mapping):
+        raise ConfigError("protocol.matrix must be a mapping")
+    total_seed_blocks = 0
+    for slot in matrix.get("primary", ()):
+        if not isinstance(slot, Mapping):
+            raise ConfigError("protocol.matrix.primary entries must be mappings")
+        slot_seeds = slot.get("seeds", protocol.get("seeds", ()))
+        if not isinstance(slot_seeds, Sequence) or isinstance(slot_seeds, (str, bytes)):
+            raise ConfigError("protocol matrix seeds must be a sequence")
+        total_seed_blocks += len(slot_seeds)
+    return total_seed_blocks * len(active_conditions_for_protocol(protocol))
+
+
 def _read_yaml(path: str | Path) -> Any:
     if yaml is None:
         raise ConfigError("PyYAML is required to read configuration files")
@@ -482,6 +743,7 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "protocol_version", "seeds", "output_root", "data", "datasets", "model",
         "optimizer", "runtime", "matrix", "experiments", "conditions", "analysis",
         "protocol_status", "benchmark", "study_stage", "pilot_acceptance",
+        "active_conditions", "artifact_paths",
     }
     _check_keys(raw, allowed, "protocol")
     required = {
@@ -493,18 +755,22 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if missing:
         raise ConfigError(f"Protocol is missing required section(s): {', '.join(missing)}")
     version = _int(raw.get("protocol_version", 1), "protocol_version", 1)
-    if version not in (1, 2):
-        raise ConfigError("protocol_version must be 1 or 2")
+    if version not in (1, 2, 3):
+        raise ConfigError("protocol_version must be 1, 2, or 3")
     study_stage = raw.get("study_stage")
     if version == 1:
         if study_stage is not None:
             raise ConfigError("protocol_version 1 must not define study_stage")
         if "pilot_acceptance" in raw:
             raise ConfigError("protocol_version 1 must not define pilot_acceptance")
+        if "active_conditions" in raw or "artifact_paths" in raw:
+            raise ConfigError("protocol_version 1 must not define v3-only fields")
         expected_seeds = PRESPECIFIED_SEEDS
         expected_groups = PRESPECIFIED_PRIMARY_GROUPS
         expected_output_root = None
-    else:
+    elif version == 2:
+        if "active_conditions" in raw or "artifact_paths" in raw:
+            raise ConfigError("protocol_version 2 must not define v3-only fields")
         _require_exact(study_stage, "pilot", "study_stage")
         acceptance = _check_mapping(
             raw.get("pilot_acceptance"), "protocol.pilot_acceptance"
@@ -523,6 +789,33 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
                 "protocol.pilot_acceptance must exactly match one supported v2 pilot profile"
             )
         expected_seeds, expected_groups, expected_output_root, _ = matching_profiles[0]
+    else:
+        _require_exact(study_stage, "pilot_and_formal", "study_stage")
+        acceptance = _check_mapping(
+            raw.get("pilot_acceptance"), "protocol.pilot_acceptance"
+        )
+        _check_keys(acceptance, V3_PILOT_ACCEPTANCE, "protocol.pilot_acceptance")
+        _require_exact(
+            dict(acceptance), V3_PILOT_ACCEPTANCE, "protocol.pilot_acceptance"
+        )
+        active = raw.get("active_conditions")
+        if not isinstance(active, Sequence) or isinstance(active, (str, bytes)):
+            raise ConfigError("protocol.active_conditions must be a sequence")
+        _require_exact(
+            tuple(str(value) for value in active),
+            V3_ACTIVE_CONDITIONS,
+            "active_conditions",
+        )
+        artifact_paths = _check_mapping(
+            raw.get("artifact_paths"), "protocol.artifact_paths"
+        )
+        _check_keys(artifact_paths, V3_ARTIFACT_PATHS, "protocol.artifact_paths")
+        _require_exact(
+            dict(artifact_paths), V3_ARTIFACT_PATHS, "protocol.artifact_paths"
+        )
+        expected_seeds = V3_FORMAL_SEEDS
+        expected_groups = V3_PRIMARY_GROUPS
+        expected_output_root = V3_OUTPUT_ROOT
     seeds_raw = raw.get("seeds", list(expected_seeds))
     if not isinstance(seeds_raw, Sequence) or isinstance(seeds_raw, (str, bytes)) or not seeds_raw:
         raise ConfigError("seeds must be a non-empty sequence")
@@ -530,6 +823,8 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if len(set(seeds)) != len(seeds):
         raise ConfigError("seeds must be unique")
     _require_exact(tuple(seeds), expected_seeds, "seeds")
+    if version == 3 and set(seeds) & V3_RETIRED_SEEDS:
+        raise ConfigError("v3 seeds must not reuse a retired v1/v2/diagnostic seed")
     output_root = str(raw.get("output_root", "results"))
     if not output_root:
         raise ConfigError("output_root cannot be empty")
@@ -541,6 +836,9 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     normalized["protocol_version"] = version
     normalized["seeds"] = seeds
     normalized["output_root"] = output_root
+    if version == 3:
+        normalized["active_conditions"] = list(V3_ACTIVE_CONDITIONS)
+        normalized["artifact_paths"] = dict(V3_ARTIFACT_PATHS)
     if "optimizer" in raw:
         _validate_optimizer_mapping(_check_mapping(raw["optimizer"], "protocol.optimizer"), "protocol.optimizer")
     if "runtime" in raw:
@@ -627,12 +925,15 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
                 "protocol.matrix.primary[0].seeds",
             )
     if "analysis" in raw:
-        _validate_analysis_mapping(
-            _check_mapping(raw["analysis"], "protocol.analysis"), "protocol.analysis"
-        )
+        analysis = _check_mapping(raw["analysis"], "protocol.analysis")
+        if version == 3:
+            _validate_v3_analysis_mapping(analysis, "protocol.analysis")
+        else:
+            _validate_analysis_mapping(analysis, "protocol.analysis")
     if "protocol_status" in raw:
         _validate_protocol_status(
-            _check_mapping(raw["protocol_status"], "protocol.protocol_status")
+            _check_mapping(raw["protocol_status"], "protocol.protocol_status"),
+            version=version,
         )
         if version == 2 and raw["protocol_status"].get("frozen") is not False:
             raise ConfigError("The v2 pilot protocol must remain unfrozen")
@@ -919,6 +1220,16 @@ def _validate_analysis_mapping(analysis: Mapping[str, Any], name: str) -> None:
     _require_exact(dict(wording_gates), PRESPECIFIED_WORDING_GATES, f"{name}.wording_gates")
 
 
+def _validate_v3_analysis_mapping(analysis: Mapping[str, Any], name: str) -> None:
+    """Validate the isolated TA-LIF-only analysis contract without weakening v1/v2."""
+
+    _check_keys(analysis, V3_ANALYSIS_CONTRACT, name)
+    missing = sorted(set(V3_ANALYSIS_CONTRACT) - set(analysis))
+    if missing:
+        raise ConfigError(f"{name} is missing required key(s): {', '.join(missing)}")
+    _require_exact(dict(analysis), V3_ANALYSIS_CONTRACT, name)
+
+
 def _validate_benchmark_mapping(benchmark: Mapping[str, Any], name: str) -> None:
     allowed = {*PRESPECIFIED_BENCHMARK, "energy_model"}
     _check_keys(benchmark, allowed, name)
@@ -983,7 +1294,10 @@ def _validate_run_analysis_mapping(
     generated = dict(analysis)
     matrix_key = generated.pop("matrix_key", None)
     protocol_hash = generated.pop("protocol_hash", None)
-    _validate_analysis_mapping(generated, name)
+    if int(protocol.get("protocol_version", 1)) == 3:
+        _validate_v3_analysis_mapping(generated, name)
+    else:
+        _validate_analysis_mapping(generated, name)
     if not isinstance(matrix_key, Sequence) or isinstance(matrix_key, (str, bytes)):
         raise ConfigError(f"{name}.matrix_key must be a five-element sequence")
     expected_key = [
@@ -1005,7 +1319,7 @@ def _validate_run_analysis_mapping(
         _require_exact(protocol_hash, expected_hash, f"{name}.protocol_hash")
 
 
-def _validate_protocol_status(status: Mapping[str, Any]) -> None:
+def _validate_protocol_status(status: Mapping[str, Any], *, version: int = 1) -> None:
     name = "protocol.protocol_status"
     _check_keys(status, {"frozen", "confirmed_by", "confirmed_at", "confirmations", "notes"}, name)
     if "frozen" in status and not isinstance(status["frozen"], bool):
@@ -1013,9 +1327,18 @@ def _validate_protocol_status(status: Mapping[str, Any]) -> None:
     for key in ("confirmed_by", "confirmed_at", "notes"):
         if key in status and status[key] is not None and not isinstance(status[key], str):
             raise ConfigError(f"{name}.{key} must be a string or null")
+    confirmation_fields = (
+        V3_PROTOCOL_CONFIRMATION_FIELDS if version == 3 else PROTOCOL_CONFIRMATION_FIELDS
+    )
     confirmations = status.get("confirmations", {})
     confirmations = _check_mapping(confirmations, f"{name}.confirmations")
-    _check_keys(confirmations, PROTOCOL_CONFIRMATION_FIELDS, f"{name}.confirmations")
+    _check_keys(confirmations, confirmation_fields, f"{name}.confirmations")
+    if version == 3:
+        missing = sorted(set(confirmation_fields) - set(confirmations))
+        if missing:
+            raise ConfigError(
+                f"{name}.confirmations is missing required key(s): {', '.join(missing)}"
+            )
     for key, value in confirmations.items():
         if not isinstance(value, bool):
             raise ConfigError(f"{name}.confirmations.{key} must be boolean")
@@ -1085,6 +1408,13 @@ def _resolve_model(raw: Mapping[str, Any], protocol: Mapping[str, Any], data: Da
                     ).upper()
     if condition not in SUPPORTED_CONDITIONS:
         raise ConfigError(f"condition must be one of {SUPPORTED_CONDITIONS}, got {condition!r}")
+    if protocol and int(protocol.get("protocol_version", 1)) == 3:
+        active_conditions = active_conditions_for_protocol(protocol)
+        if condition not in active_conditions:
+            raise ConfigError(
+                f"condition {condition!r} is inactive for protocol v3; "
+                f"expected one of {active_conditions}"
+            )
     expected = CONDITION_SPECS[condition]
     topology = str(base.get("topology", expected["topology"]))
     neuron = str(base.get("neuron", expected["neuron"])).replace("-", "_")
@@ -1216,18 +1546,19 @@ def _dataset_specs(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
 
 
 def generate_run_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """Generate the versioned C1-C4 matrix without mixing protocol generations."""
+    """Generate the versioned active-condition matrix without mixing generations."""
 
     protocol = validate_protocol(protocol)
     protocol_hash = hashlib.sha256(canonical_json(protocol).encode("utf-8")).hexdigest()
+    active_conditions = active_conditions_for_protocol(protocol)
     runs: List[Dict[str, Any]] = []
     seen: set[Tuple[Any, ...]] = set()
     for slot in _dataset_specs(protocol):
         slot_seeds = list(slot["_matrix_seeds"])
         pairs = (
-            ((condition, seed) for condition in SUPPORTED_CONDITIONS for seed in slot_seeds)
+            ((condition, seed) for condition in active_conditions for seed in slot_seeds)
             if protocol["protocol_version"] == 1
-            else ((condition, seed) for seed in slot_seeds for condition in SUPPORTED_CONDITIONS)
+            else ((condition, seed) for seed in slot_seeds for condition in active_conditions)
         )
         for condition, seed in pairs:
                 key = (slot["dataset"], slot["depth"], slot["time_steps"], condition, seed)
@@ -1262,18 +1593,85 @@ def generate_run_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
                     "final_test": False,
                     "analysis": analysis,
                 })
-    expected_run_count = (
-        EXPECTED_RUN_COUNT
-        if protocol["protocol_version"] == 1
-        else sum(len(slot["_matrix_seeds"]) for slot in _dataset_specs(protocol))
-        * len(SUPPORTED_CONDITIONS)
-    )
+    expected_run_count = expected_run_count_for_protocol(protocol)
     if len(runs) != expected_run_count:
         raise ConfigError(
             f"Expected {expected_run_count} unique runs, generated {len(runs)}"
         )
     if any(run["experiment"] != "E1" for run in runs):
         raise ConfigError("The confirmatory matrix must contain only E1 runs")
+    return runs
+
+
+def generate_v3_pilot_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Generate the two dataset-specific, non-reportable C1/C2 pilot blocks."""
+
+    protocol = validate_protocol(protocol)
+    if protocol["protocol_version"] != 3:
+        raise ConfigError("The v3 pilot matrix requires protocol_version 3")
+    acceptance = _check_mapping(
+        protocol.get("pilot_acceptance"), "protocol.pilot_acceptance"
+    )
+    dataset_acceptance = _check_mapping(
+        acceptance.get("datasets"), "protocol.pilot_acceptance.datasets"
+    )
+    active_conditions = active_conditions_for_protocol(protocol)
+    protocol_hash = hashlib.sha256(canonical_json(protocol).encode("utf-8")).hexdigest()
+    runs: List[Dict[str, Any]] = []
+    seen: set[Tuple[Any, ...]] = set()
+    for slot in _dataset_specs(protocol):
+        dataset = str(slot["dataset"])
+        dataset_gate = _check_mapping(
+            dataset_acceptance.get(dataset),
+            f"protocol.pilot_acceptance.datasets.{dataset}",
+        )
+        seed = _int(
+            dataset_gate.get("seed"),
+            f"protocol.pilot_acceptance.datasets.{dataset}.seed",
+            1,
+        )
+        if seed in V3_RETIRED_SEEDS or seed in V3_FORMAL_SEEDS:
+            raise ConfigError(f"v3 pilot seed for {dataset} is retired or formal")
+        for condition in active_conditions:
+            key = (dataset, slot["depth"], slot["time_steps"], condition, seed)
+            if key in seen:
+                raise ConfigError(f"Duplicate v3 pilot matrix key: {key}")
+            seen.add(key)
+            run_id = (
+                f"{slot['experiment']}_{dataset}_d{slot['depth']}_"
+                f"t{slot['time_steps']}_{condition}_s{seed}"
+            )
+            data = {
+                key_name: value
+                for key_name, value in slot.items()
+                if key_name not in {"depth", "time_steps", "experiment", "_matrix_seeds"}
+            }
+            analysis = copy.deepcopy(dict(protocol["analysis"]))
+            analysis.update({"matrix_key": list(key), "protocol_hash": protocol_hash})
+            runs.append(
+                {
+                    "protocol_version": 3,
+                    "experiment": slot["experiment"],
+                    "run_id": run_id,
+                    "condition": condition,
+                    "seed": seed,
+                    "data": data,
+                    "model": {
+                        "condition": condition,
+                        "topology": CONDITION_SPECS[condition]["topology"],
+                        "neuron": CONDITION_SPECS[condition]["neuron"],
+                        "depth": slot["depth"],
+                        "time_steps": slot["time_steps"],
+                    },
+                    "optimizer": dict(protocol["optimizer"]),
+                    "runtime": {"output_dir": str(dataset_gate["pilot_output_root"])},
+                    "final_test": False,
+                    "analysis": analysis,
+                }
+            )
+    expected = len(V3_PRIMARY_GROUPS) * len(V3_ACTIVE_CONDITIONS)
+    if len(runs) != expected:
+        raise ConfigError(f"Expected {expected} unique v3 pilot runs, generated {len(runs)}")
     return runs
 
 

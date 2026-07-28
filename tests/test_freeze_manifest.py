@@ -17,6 +17,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from talif_msresnet.config import PROTOCOL_CONFIRMATION_FIELDS  # noqa: E402
+
 
 def _load_tool() -> ModuleType:
     path = ROOT / "scripts" / "create_freeze_manifest.py"
@@ -48,7 +50,7 @@ def _signed_record(*, signed: bool = True) -> str:
         else "Status: **DRAFT - NOT SIGNED, NOT FROZEN**"
     )
     checklist = "\n".join(
-        f"- [x] `{field}`: reviewed." for field in tool.PROTOCOL_CONFIRMATION_FIELDS
+        f"- [x] `{field}`: reviewed." for field in PROTOCOL_CONFIRMATION_FIELDS
     )
     song_approval = (
         "- Song Wang, corresponding author - approval evidence/location: "
@@ -77,7 +79,7 @@ def _protocol(*, frozen: bool = True) -> dict[str, Any]:
     status["confirmed_by"] = "Yanzhao Deng; Peng Yan; Song Wang"
     status["confirmed_at"] = "2026-07-21T18:30:00+08:00"
     status["confirmations"] = {
-        field: frozen for field in tool.PROTOCOL_CONFIRMATION_FIELDS
+        field: frozen for field in PROTOCOL_CONFIRMATION_FIELDS
     }
     return value
 
@@ -140,7 +142,7 @@ def _generate_matrix(project: Path) -> Path:
         "protocol": protocol_path.relative_to(project).as_posix(),
         "protocol_hash": tool._stable_hash(protocol),
         "run_count": len(raw_runs),
-        "conditions": list(tool.SUPPORTED_CONDITIONS),
+        "conditions": list(tool.active_conditions_for_protocol(protocol)),
         "seeds": protocol["seeds"],
         "matrix_hash": tool._stable_hash(raw_runs),
         "runs": rows,

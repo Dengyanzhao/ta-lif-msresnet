@@ -18,7 +18,13 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from talif_msresnet.config import EXPECTED_RUN_COUNT, validate_run_mapping  # noqa: E402
+from talif_msresnet.config import (  # noqa: E402
+    EXPECTED_RUN_COUNT,
+    artifact_paths_for_protocol,
+    expected_run_count_for_protocol,
+    load_protocol,
+    validate_run_mapping,
+)
 from talif_msresnet.data import build_test_loader  # noqa: E402
 from talif_msresnet.models import build_model  # noqa: E402
 from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
@@ -54,7 +60,10 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     return value
 
 
-def _read_expected(config_dir: Path) -> list[dict[str, str]]:
+def _read_expected(
+    config_dir: Path,
+    expected_count: int = EXPECTED_RUN_COUNT,
+) -> list[dict[str, str]]:
     manifest = config_dir / "run_manifest.csv"
     if not manifest.exists():
         raise FileNotFoundError(f"Missing {manifest}; generate the frozen matrix first")
@@ -69,11 +78,11 @@ def _read_expected(config_dir: Path) -> list[dict[str, str]]:
             raise RuntimeError(f"Frozen run_manifest.csv is missing columns: {sorted(missing)}")
         rows = list(reader)
     if (
-        len(rows) != EXPECTED_RUN_COUNT
-        or len({row["run_id"] for row in rows}) != EXPECTED_RUN_COUNT
+        len(rows) != expected_count
+        or len({row["run_id"] for row in rows}) != expected_count
     ):
         raise RuntimeError(
-            f"Final test requires the complete {EXPECTED_RUN_COUNT}-run matrix"
+            f"Final test requires the complete {expected_count}-run matrix"
         )
     for row in rows:
         config_path = config_dir / row["config_file"]
@@ -386,7 +395,10 @@ def _commit_final_test(run_dir: Path, results_root: Path, journal: Mapping[str, 
         "checkpoint_sha256": checkpoint_hash,
         "selected_epoch": int(journal["checkpoint_epoch_zero_based"]) + 1,
         "checkpoint_epoch_zero_based": int(journal["checkpoint_epoch_zero_based"]),
-        "model_selection_rule": "highest validation accuracy; ties resolved by lower validation loss",
+        "model_selection_rule": (
+            "highest validation accuracy; ties resolved by lower validation loss; "
+            "exact ties resolved by earliest epoch"
+        ),
         "evaluated_at": evaluated_at,
         "device": journal["device"],
         "test_loss": float(result["loss"]),
@@ -504,8 +516,8 @@ def _evaluate_one(run_dir: Path, device_name: str, results_root: Path) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results-root", default=str(PROJECT_ROOT / "results" / "runs"))
-    parser.add_argument("--config-dir", default=str(PROJECT_ROOT / "configs" / "generated"))
+    parser.add_argument("--results-root")
+    parser.add_argument("--config-dir")
     parser.add_argument("--protocol", default=str(PROJECT_ROOT / "configs" / "protocol.yaml"))
     parser.add_argument("--device", default="auto")
     parser.add_argument("--limit", type=int, help="Evaluate the first N pending checkpoints after full freeze audit")
@@ -534,8 +546,25 @@ def main(argv: list[str] | None = None) -> int:
     if not report.ok:
         details = "\n".join(f"- {item}" for item in report.errors)
         raise SystemExit(f"Final-test preflight blocked:\n{details}")
-    results_root = Path(args.results_root).resolve()
-    rows = _read_expected(Path(args.config_dir).resolve())
+    protocol = load_protocol(args.protocol)
+    artifacts = artifact_paths_for_protocol(protocol)
+    default_results = PROJECT_ROOT / artifacts["formal_results"]
+    default_configs = PROJECT_ROOT / artifacts["formal_matrix"]
+    results_root = Path(args.results_root or default_results).resolve()
+    config_dir = Path(args.config_dir or default_configs).resolve()
+    if int(protocol.get("protocol_version", 1)) == 3:
+        if results_root != default_results.resolve():
+            raise SystemExit(
+                "Protocol v3 final test must use artifact_paths.formal_results"
+            )
+        if config_dir != default_configs.resolve():
+            raise SystemExit(
+                "Protocol v3 final test must use artifact_paths.formal_matrix"
+            )
+    rows = _read_expected(
+        config_dir,
+        expected_count=expected_run_count_for_protocol(protocol),
+    )
     _audit_consolidated_metrics(rows, results_root, recovery_run=args.recover_run)
     if args.recover_run:
         planned_ids = {row["run_id"] for row in rows}

@@ -1,10 +1,20 @@
 # TA-LIF x MS-ResNet
 
-> **Current study status (2026-07-27):** formal v1 is withdrawn from reporting
+> **Current manuscript route (2026-07-28):** the MS-ResNet component is closed
+> for the current paper. C3/C4 and all topology/interaction claims are retained
+> only as code and non-reportable audit evidence for possible future work.
+> Historical files must not be deleted or rewritten. The active work is the
+> unfrozen C1-versus-C2 TA-LIF-only v3 design in
+> `V3_TALIF_ONLY_PROTOCOL_DRAFT.md`; it authorizes no GPU execution. See
+> `MS_RESNET_ROUTE_CLOSURE.md` for the preservation boundary.
+> The remaining v1/v2 instructions in this README are historical documentation
+> and must not be used to launch v3 work.
+
+> **Historical study status (through 2026-07-27):** formal v1 is withdrawn from reporting
 > after a structural no-learning defect and a deterministic TA-backward
 > performance incident were identified. Preserve its artifacts for audit only;
 > do not resume its checkpoints or combine them with repaired runs. See
-> `FORMAL_V1_INCIDENT.md`. Development now proceeds through the separate,
+> `FORMAL_V1_INCIDENT.md`. Development had proceeded through the separate,
 > non-reportable `configs/protocol_v2r2_seed88_of80_e120.yaml` gate. The failed
 > seed-77 v2r1 gate is retained for audit and must not be rerun. No v2 formal
 > protocol is frozen yet.
@@ -208,15 +218,9 @@ fresh `configs/generated` directory bound by the Phase B manifest.
 
 The seed-77 v2r1 health gate is a retained failed engineering record and is no
 longer an active pilot identity. Its protocol, report, and benchmark evidence
-must not be overwritten or rerun. The only active non-reportable pilot is the
-fixed v2r2 seed-88 C1-C4 block in
-`configs/protocol_v2r2_seed88_of80_e120.yaml`. Follow
-`V2R2_PILOT_RUNBOOK.md`: first produce the bound RTX 5090 80-step health report,
-then launch the complete ordered quartet in one invocation. Partial condition
-selection, a fifth run, another seed/block, another output root, stale generated
-configs, or an unbound health report is rejected. A technical interruption may
-resume only on the same environment from that run's own `last.pt`;
-cross-environment resume is forbidden.
+must not be overwritten or rerun. The v2r2 seed-88 C1-C4 block in
+`configs/protocol_v2r2_seed88_of80_e120.yaml` is also historical and must not be
+rerun. `V2R2_PILOT_RUNBOOK.md` is retained only to document that closed route.
 
 ## Full validation-only training
 

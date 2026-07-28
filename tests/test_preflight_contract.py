@@ -82,7 +82,8 @@ def test_full_mode_checks_phase_b_manifest_after_author_freeze(
     status["confirmed_by"] = "Yanzhao Deng; Peng Yan; Song Wang"
     status["confirmed_at"] = "2026-07-21T23:00:00+08:00"
     status["confirmations"] = {
-        field: True for field in preflight_module.PROTOCOL_CONFIRMATION_FIELDS
+        field: True
+        for field in preflight_module.confirmation_fields_for_protocol(protocol)
     }
     monkeypatch.setattr(preflight_module, "load_protocol", lambda _path: protocol)
 

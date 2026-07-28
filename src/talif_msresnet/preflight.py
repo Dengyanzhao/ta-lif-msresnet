@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .config import PROTOCOL_CONFIRMATION_FIELDS, load_protocol
+from .config import (
+    confirmation_fields_for_protocol,
+    load_protocol,
+)
 from .freeze import FreezeGateError, verify_formal_freeze
 
 
@@ -393,6 +396,8 @@ def check_protocol(
     path = Path(protocol_path).resolve()
     root = Path(project_root).resolve() if project_root is not None else path.parents[1]
     protocol = load_protocol(path)
+    protocol_version = int(protocol.get("protocol_version", 1))
+    confirmation_fields = confirmation_fields_for_protocol(protocol)
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -421,7 +426,7 @@ def check_protocol(
         confirmations = status.get("confirmations", {})
         if not isinstance(confirmations, Mapping):
             confirmations = {}
-        for field in PROTOCOL_CONFIRMATION_FIELDS:
+        for field in confirmation_fields:
             if confirmations.get(field) is not True:
                 errors.append(f"protocol_status.confirmations.{field} must be true")
 
@@ -442,17 +447,27 @@ def check_protocol(
         for dataset in sorted(matrix_datasets):
             if thresholds.get(dataset) is None:
                 errors.append(f"analysis.validation_accuracy_thresholds.{dataset} must be frozen")
-        if analysis.get("interaction_practical_threshold_pp") is None:
-            errors.append("analysis.interaction_practical_threshold_pp must be frozen")
-        margins = analysis.get("efficiency_noninferiority_margins", {})
-        if not isinstance(margins, Mapping) or not margins:
-            errors.append("analysis.efficiency_noninferiority_margins must be defined")
+        if protocol_version == 3:
+            primary_test = analysis.get("primary_accuracy_test", {})
+            if not isinstance(primary_test, Mapping):
+                errors.append("analysis.primary_accuracy_test must be defined for v3")
+            elif primary_test.get("decision_rule") != "p_lt_0_05_and_mean_delta_gt_0":
+                errors.append("analysis.primary_accuracy_test decision rule differs from v3")
+            bootstrap = analysis.get("bootstrap", {})
+            if not isinstance(bootstrap, Mapping) or bootstrap.get("resamples") != 10_000:
+                errors.append("analysis.bootstrap must define the fixed 10000-resample v3 contract")
         else:
-            for metric, value in margins.items():
-                if value is None:
-                    errors.append(
-                        f"analysis.efficiency_noninferiority_margins.{metric} must be frozen"
-                    )
+            if analysis.get("interaction_practical_threshold_pp") is None:
+                errors.append("analysis.interaction_practical_threshold_pp must be frozen")
+            margins = analysis.get("efficiency_noninferiority_margins", {})
+            if not isinstance(margins, Mapping) or not margins:
+                errors.append("analysis.efficiency_noninferiority_margins must be defined")
+            else:
+                for metric, value in margins.items():
+                    if value is None:
+                        errors.append(
+                            f"analysis.efficiency_noninferiority_margins.{metric} must be frozen"
+                        )
 
         benchmark = protocol.get("benchmark", {})
         energy = benchmark.get("energy_model", {}) if isinstance(benchmark, Mapping) else {}
@@ -495,7 +510,15 @@ def check_protocol(
         warnings.append("CutMix is explicitly disabled in the current protocol")
     if not optimizer.get("label_smoothing"):
         warnings.append("Label smoothing is explicitly disabled in the current protocol")
-    if protocol.get("analysis", {}).get("efficiency_assessment") == "descriptive":
+    analysis = protocol.get("analysis", {})
+    efficiency = analysis.get("efficiency", {}) if isinstance(analysis, Mapping) else {}
+    if (
+        isinstance(analysis, Mapping)
+        and analysis.get("efficiency_assessment") == "descriptive"
+    ) or (
+        isinstance(efficiency, Mapping)
+        and efficiency.get("role") == "descriptive_only"
+    ):
         warnings.append(
             "Efficiency margins are descriptive reference bands, not confirmatory hypothesis tests"
         )
@@ -506,7 +529,7 @@ def check_protocol(
         and _nonempty(status.get("confirmed_by"))
         and _nonempty(status.get("confirmed_at"))
         and isinstance(confirmations, Mapping)
-        and all(confirmations.get(field) is True for field in PROTOCOL_CONFIRMATION_FIELDS)
+        and all(confirmations.get(field) is True for field in confirmation_fields)
     )
     if mode in {"full", "final-test"} and freeze_fields_complete:
         try:

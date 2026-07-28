@@ -22,8 +22,10 @@ if str(SRC_ROOT) not in sys.path:
 
 from talif_msresnet.config import (  # noqa: E402
     RunConfig,
-    SUPPORTED_CONDITIONS,
+    active_conditions_for_protocol,
+    artifact_paths_for_protocol,
     generate_run_matrix,
+    generate_v3_pilot_matrix,
     load_protocol,
     validate_run_mapping,
 )
@@ -72,9 +74,22 @@ def _manifest_rows(runs: Sequence[RunConfig], output_dir: Path) -> list[dict[str
     return rows
 
 
-def generate(protocol_path: str | Path, output_dir: str | Path) -> list[dict[str, Any]]:
+def generate(
+    protocol_path: str | Path,
+    output_dir: str | Path,
+    *,
+    stage: str = "formal",
+) -> list[dict[str, Any]]:
     protocol = load_protocol(protocol_path)
-    runs = generate_run_matrix(protocol)
+    if stage not in {"formal", "pilot"}:
+        raise ValueError("stage must be formal or pilot")
+    if stage == "pilot" and protocol["protocol_version"] != 3:
+        raise ValueError("Pilot matrix generation through this mode requires protocol v3")
+    runs = (
+        generate_v3_pilot_matrix(protocol)
+        if stage == "pilot"
+        else generate_run_matrix(protocol)
+    )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_yaml_names = {f"{run['run_id']}.yaml" for run in runs}
@@ -98,8 +113,8 @@ def generate(protocol_path: str | Path, output_dir: str | Path) -> list[dict[str
         "protocol": _protocol_reference(protocol_path),
         "protocol_hash": stable_hash(protocol),
         "run_count": len(runs),
-        "conditions": list(SUPPORTED_CONDITIONS),
-        "seeds": protocol["seeds"],
+        "conditions": list(active_conditions_for_protocol(protocol)),
+        "seeds": list(dict.fromkeys(run.runtime.seed for run in resolved_runs)),
         "matrix_hash": stable_hash(runs),
         "runs": rows,
     })
@@ -109,7 +124,19 @@ def generate(protocol_path: str | Path, output_dir: str | Path) -> list[dict[str
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", default=str(PROJECT_ROOT / "configs" / "protocol.yaml"))
-    parser.add_argument("--output", default=str(PROJECT_ROOT / "configs" / "generated"))
+    parser.add_argument(
+        "--output",
+        help=(
+            "Generated matrix directory. Defaults to configs/generated for legacy "
+            "protocols and to artifact_paths.formal_matrix for protocol v3."
+        ),
+    )
+    parser.add_argument(
+        "--stage",
+        choices=("formal", "pilot"),
+        default="formal",
+        help="Generate the formal matrix or the protocol-v3 non-reportable pilot matrix",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -120,15 +147,37 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    protocol = load_protocol(args.protocol)
+    matrix_path_key = "pilot_matrix" if args.stage == "pilot" else "formal_matrix"
+    if args.output is None:
+        output = (
+            PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
+            if protocol["protocol_version"] == 3
+            else PROJECT_ROOT / "configs" / "generated"
+        )
+    else:
+        output = Path(args.output)
+    if protocol["protocol_version"] == 3:
+        expected_output = (
+            PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
+        ).resolve()
+        if output.resolve() != expected_output:
+            raise SystemExit(
+                f"Protocol v3 {args.stage} generation must use its isolated matrix path: "
+                f"{expected_output}"
+            )
     if args.dry_run:
-        protocol = load_protocol(args.protocol)
-        runs = generate_run_matrix(protocol)
+        runs = (
+            generate_v3_pilot_matrix(protocol)
+            if args.stage == "pilot"
+            else generate_run_matrix(protocol)
+        )
         for run in runs:
             validate_run_mapping(run, protocol)
         print(f"Validated {len(runs)} unique configurations; no files written")
         return 0
-    runs = generate(args.protocol, args.output)
-    print(f"Generated {len(runs)} unique configurations in {Path(args.output).resolve()}")
+    runs = generate(args.protocol, output, stage=args.stage)
+    print(f"Generated {len(runs)} unique configurations in {output.resolve()}")
     return 0
 
 

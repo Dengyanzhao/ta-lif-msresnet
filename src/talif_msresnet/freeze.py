@@ -7,6 +7,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
 
+from .config import artifact_paths_for_protocol, load_protocol
+
 
 class FreezeGateError(RuntimeError):
     """Raised when a formal run is not bound to the verified freeze manifest."""
@@ -55,7 +57,12 @@ def verify_formal_freeze(
     root = Path(project_root).resolve()
     protocol = Path(protocol_path)
     protocol = (protocol if protocol.is_absolute() else root / protocol).resolve()
-    manifest = Path(manifest_path or root / "FREEZE_MANIFEST.json")
+    if manifest_path is None:
+        protocol_mapping = load_protocol(protocol)
+        manifest_value = artifact_paths_for_protocol(protocol_mapping)["freeze_manifest"]
+        manifest = root / manifest_value
+    else:
+        manifest = Path(manifest_path)
     manifest = (manifest if manifest.is_absolute() else root / manifest).resolve()
     tool = _load_manifest_tool(root)
     try:

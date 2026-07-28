@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -28,9 +29,10 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from talif_msresnet.config import (  # noqa: E402
-    PROTOCOL_CONFIRMATION_FIELDS,
-    SUPPORTED_CONDITIONS,
+    active_conditions_for_protocol,
+    artifact_paths_for_protocol,
     canonical_json,
+    confirmation_fields_for_protocol,
     generate_run_matrix,
     load_protocol,
     load_run_config,
@@ -53,6 +55,14 @@ REQUIRED_SOURCE_PATHS = (
     "scripts/prepare_cifar10dvs.py",
     "scripts/run_matrix.py",
     "scripts/verify_cifar10dvs.py",
+)
+V3_REQUIRED_SOURCE_PATHS = (
+    "src/talif_msresnet/pilot_v3.py",
+    "src/talif_msresnet/statistics_v3.py",
+    "scripts/analyze_v3_results.py",
+    "scripts/evaluate_checkpoints.py",
+    "scripts/pilot_health_gate_v3.py",
+    "scripts/validate_v3_pilot.py",
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -184,6 +194,9 @@ def _assert_creation_worktree(
     project_root: Path,
     matrix_dir: Path,
     output_path: Path,
+    *,
+    allow_legacy_artifacts: bool = False,
+    additional_artifact_dirs: Sequence[Path] = (),
 ) -> None:
     for arguments, label in (
         (("diff", "--quiet", "--no-ext-diff"), "unstaged tracked changes"),
@@ -210,13 +223,25 @@ def _assert_creation_worktree(
             f"{project_prefix}{name}"
             for name in ("data", "results", "checkpoints", "environment")
         ),
+        *(path.resolve().relative_to(repo_root).as_posix() for path in additional_artifact_dirs),
     }
     allowed_file = output_path.relative_to(repo_root).as_posix()
+    allowed_legacy_directories = (
+        {f"{project_prefix}configs/generated"} if allow_legacy_artifacts else set()
+    )
+    allowed_legacy_files = (
+        {f"{project_prefix}FREEZE_MANIFEST.json"} if allow_legacy_artifacts else set()
+    )
     unexpected: list[str] = []
     for encoded in filter(None, raw.split(b"\0")):
         relative = encoded.decode("utf-8", errors="surrogateescape").replace("\\", "/")
-        allowed = relative == allowed_file or any(
-            _is_under(relative, root) for root in allowed_directories
+        allowed = (
+            relative == allowed_file
+            or relative in allowed_legacy_files
+            or any(
+                _is_under(relative, root)
+                for root in {*allowed_directories, *allowed_legacy_directories}
+            )
         )
         if allowed:
             continue
@@ -235,6 +260,9 @@ def _assert_runtime_source(
     matrix_dir: Path,
     manifest_path: Path,
     freeze_commit: str,
+    *,
+    allow_legacy_artifacts: bool = False,
+    additional_artifact_dirs: Sequence[Path] = (),
 ) -> None:
     """Require all executable source to still match the Phase A commit."""
 
@@ -266,14 +294,28 @@ def _assert_runtime_source(
     allowed_directories = {
         matrix_dir.relative_to(repo_root).as_posix(),
         *(f"{project_prefix}{name}" for name in ("data", "results", "checkpoints", "environment")),
+        *(path.resolve().relative_to(repo_root).as_posix() for path in additional_artifact_dirs),
     }
     allowed_file = manifest_path.relative_to(repo_root).as_posix()
+    allowed_legacy_directories = (
+        {f"{project_prefix}configs/generated"} if allow_legacy_artifacts else set()
+    )
+    allowed_legacy_files = (
+        {f"{project_prefix}FREEZE_MANIFEST.json"} if allow_legacy_artifacts else set()
+    )
     unexpected: list[str] = []
     for encoded in filter(None, raw.split(b"\0")):
         relative = encoded.decode("utf-8", errors="surrogateescape").replace("\\", "/")
         if "/__pycache__/" in f"/{relative}/" or relative.endswith(".pyc"):
             continue
-        if relative == allowed_file or any(_is_under(relative, root) for root in allowed_directories):
+        if (
+            relative == allowed_file
+            or relative in allowed_legacy_files
+            or any(
+                _is_under(relative, root)
+                for root in {*allowed_directories, *allowed_legacy_directories}
+            )
+        ):
             continue
         unexpected.append(relative)
     if unexpected:
@@ -309,10 +351,9 @@ def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
     confirmations = status.get("confirmations")
     if not isinstance(confirmations, Mapping):
         raise FreezeManifestError("protocol_status.confirmations must be a mapping")
+    confirmation_fields = confirmation_fields_for_protocol(protocol)
     missing = [
-        field
-        for field in PROTOCOL_CONFIRMATION_FIELDS
-        if confirmations.get(field) is not True
+        field for field in confirmation_fields if confirmations.get(field) is not True
     ]
     if missing:
         raise FreezeManifestError(f"Protocol confirmations are incomplete: {', '.join(missing)}")
@@ -328,16 +369,16 @@ def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
     return {"confirmed_by": confirmed_by.strip(), "confirmed_at": confirmed_at}
 
 
-def _validate_signoff(text: str) -> None:
+def _validate_signoff(text: str, protocol: Mapping[str, Any]) -> None:
     status_lines = re.findall(r"^Status:.*$", text, flags=re.MULTILINE)
     if status_lines != [SIGNED_STATUS]:
         raise FreezeManifestError(
             "Author record is not in the exact signed state documented in "
-            "PREREGISTRATION_SIGNOFF.md"
+            "the protocol-bound preregistration sign-off"
         )
     if re.search(r"\[[^\]\r\n]*PENDING[^\]\r\n]*\]", text, flags=re.IGNORECASE):
         raise FreezeManifestError("Author record still contains a bracketed pending placeholder")
-    for field in PROTOCOL_CONFIRMATION_FIELDS:
+    for field in confirmation_fields_for_protocol(protocol):
         pattern = rf"^- \[[xX]\] `{re.escape(field)}`:"
         if re.search(pattern, text, flags=re.MULTILINE) is None:
             raise FreezeManifestError(f"Author checklist item is not checked: {field}")
@@ -360,6 +401,106 @@ def _read_json(path: Path, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise FreezeManifestError(f"{label} must contain a JSON object")
     return value
+
+
+def _validate_v3_pilot_acceptance(
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    project_root: Path,
+) -> dict[str, Any]:
+    """Re-run the read-only v3 pilot audit and bind its immutable PASS report."""
+
+    acceptance = protocol.get("pilot_acceptance")
+    if not isinstance(acceptance, Mapping):
+        raise FreezeManifestError("Protocol v3 has no pilot_acceptance mapping")
+    validation_value = acceptance.get("validation_output")
+    if not isinstance(validation_value, str) or not validation_value.strip():
+        raise FreezeManifestError("Protocol v3 has no pilot validation output path")
+    validation_path = _inside(
+        project_root,
+        validation_value,
+        "V3 pilot validation",
+        kind="file",
+    )
+    stored = dict(_read_json(validation_path, "v3 pilot validation"))
+    expected_top = {
+        "schema_version": 1,
+        "artifact_class": "NON_REPORTABLE_V3_TALIF_ONLY_PILOT_ACCEPTANCE",
+        "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
+        "confirmatory_analysis_eligibility": False,
+        "status": "PASS",
+        "pass": True,
+        "decision": "ACCEPT_V3_TALIF_ONLY_120_EPOCH_PILOT",
+        "exit_code": 0,
+        "protocol_hash": _stable_hash(protocol),
+        "acceptance_hash": _stable_hash(dict(acceptance)),
+    }
+    mismatches = [
+        key for key, expected in expected_top.items() if stored.get(key) != expected
+    ]
+    datasets = stored.get("datasets")
+    if not isinstance(datasets, Mapping) or set(datasets) != {"cifar100", "cifar10dvs"}:
+        mismatches.append("datasets")
+    elif any(
+        not isinstance(datasets[name], Mapping)
+        or datasets[name].get("status") != "PASS"
+        or datasets[name].get("pass") is not True
+        for name in ("cifar100", "cifar10dvs")
+    ):
+        mismatches.append("dataset PASS states")
+    if stored.get("integrity_failures") != [] or stored.get("threshold_failures") != []:
+        mismatches.append("failure records")
+    if mismatches:
+        raise FreezeManifestError(
+            "V3 pilot validation is not an exact aggregate PASS: "
+            + ", ".join(mismatches)
+        )
+
+    validator_path = project_root / "scripts" / "validate_v3_pilot.py"
+    spec = importlib.util.spec_from_file_location(
+        "talif_freeze_v3_pilot_validator", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise FreezeManifestError("Cannot load the v3 pilot validator")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        current = module.validate_pilot(
+            protocol_path=protocol_path,
+            config_dir=project_root
+            / artifact_paths_for_protocol(protocol)["pilot_matrix"],
+            repository_root=project_root,
+        )
+    except Exception as exc:
+        raise FreezeManifestError(
+            f"Current v3 pilot artifacts fail revalidation: {type(exc).__name__}: {exc}"
+        ) from exc
+    stored_comparable = dict(stored)
+    current_comparable = dict(current)
+    stored_comparable.pop("validated_at", None)
+    current_comparable.pop("validated_at", None)
+    if stored_comparable != current_comparable:
+        raise FreezeManifestError(
+            "Stored v3 pilot validation differs from the current pilot artifacts"
+        )
+    return {
+        "path": validation_path.relative_to(project_root).as_posix(),
+        "sha256": _sha256_file(validation_path),
+        "protocol_hash": stored["protocol_hash"],
+        "acceptance_hash": stored["acceptance_hash"],
+        "validated_at": stored.get("validated_at"),
+        "datasets": {
+            name: {
+                "health_report_sha256": datasets[name].get("health_report_sha256"),
+                "attempt_receipt_sha256": datasets[name].get(
+                    "attempt_receipt_sha256"
+                ),
+                "pilot_plan_sha256": datasets[name].get("pilot_plan_sha256"),
+                "environment_sha256": datasets[name].get("environment_sha256"),
+            }
+            for name in ("cifar100", "cifar10dvs")
+        },
+    }
 
 
 def _manifest_row(resolved: Any, config_path: Path) -> dict[str, Any]:
@@ -442,7 +583,7 @@ def _validate_matrix(
         "protocol": expected_protocol,
         "protocol_hash": protocol_hash,
         "run_count": len(expected_runs),
-        "conditions": list(SUPPORTED_CONDITIONS),
+        "conditions": list(active_conditions_for_protocol(protocol)),
         "seeds": list(protocol["seeds"]),
         "matrix_hash": matrix_hash,
         "runs": expected_rows,
@@ -512,10 +653,40 @@ def build_manifest(
         raise FreezeManifestError("Output must be outside the generated matrix directory")
 
     protocol = load_protocol(protocol_path)
+    is_v3 = int(protocol.get("protocol_version", 1)) == 3
+    if is_v3:
+        artifacts = artifact_paths_for_protocol(protocol)
+        expected_paths = {
+            "protocol": (project_root / artifacts["protocol"]).resolve(),
+            "signoff": (project_root / artifacts["signoff"]).resolve(),
+            "matrix": (project_root / artifacts["formal_matrix"]).resolve(),
+            "freeze manifest": (project_root / artifacts["freeze_manifest"]).resolve(),
+        }
+        observed_paths = {
+            "protocol": protocol_path,
+            "signoff": signoff_path,
+            "matrix": matrix_dir,
+            "freeze manifest": output_path,
+        }
+        mismatches = [
+            f"{label}: {observed_paths[label]} != {expected}"
+            for label, expected in expected_paths.items()
+            if observed_paths[label] != expected
+        ]
+        if mismatches:
+            raise FreezeManifestError(
+                "Protocol v3 freeze inputs must use their isolated artifact paths: "
+                + "; ".join(mismatches)
+            )
     confirmation = _validate_protocol_status(protocol)
     signoff_text = signoff_path.read_text(encoding="utf-8")
-    _validate_signoff(signoff_text)
+    _validate_signoff(signoff_text, protocol)
     created_at = _parse_aware_timestamp(created_at, "created_at")
+    pilot_validation = (
+        _validate_v3_pilot_acceptance(protocol, protocol_path, project_root)
+        if is_v3
+        else None
+    )
 
     repo_root = _git_repository(project_root)
     commit = _resolve_commit(project_root, freeze_commit, require_head=require_creation_state)
@@ -525,13 +696,28 @@ def build_manifest(
     committed_signoff = _assert_committed_text(
         repo_root, commit, signoff_path, "Author sign-off at freeze commit"
     )
-    for relative in REQUIRED_SOURCE_PATHS:
+    required_sources = (
+        (*REQUIRED_SOURCE_PATHS, *V3_REQUIRED_SOURCE_PATHS)
+        if is_v3
+        else REQUIRED_SOURCE_PATHS
+    )
+    for relative in required_sources:
         source_path = project_root / relative
         if not source_path.is_file():
             raise FreezeManifestError(f"Required experiment source is missing: {relative}")
         _assert_committed_text(repo_root, commit, source_path, f"Required source {relative}")
     if require_creation_state:
-        _assert_creation_worktree(repo_root, project_root, matrix_dir, output_path)
+        additional_artifact_dirs = (
+            (project_root / artifacts["pilot_matrix"],) if is_v3 else ()
+        )
+        _assert_creation_worktree(
+            repo_root,
+            project_root,
+            matrix_dir,
+            output_path,
+            allow_legacy_artifacts=is_v3,
+            additional_artifact_dirs=additional_artifact_dirs,
+        )
     remote = _repository_url(repo_root, repository_url)
     tree = _git(repo_root, ("rev-parse", f"{commit}^{{tree}}"))
     commit_time = _git(repo_root, ("show", "-s", "--format=%cI", commit))
@@ -543,7 +729,7 @@ def build_manifest(
     def project_relative(path: Path) -> str:
         return path.relative_to(project_root).as_posix()
 
-    return {
+    manifest = {
         "schema": SCHEMA,
         "created_at": created_at,
         "repository": {
@@ -566,6 +752,9 @@ def build_manifest(
         },
         "generated_matrix": matrix,
     }
+    if pilot_validation is not None:
+        manifest["pilot_validation"] = pilot_validation
+    return manifest
 
 
 def _atomic_create_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -661,12 +850,30 @@ def verify_manifest(*, project_root: Path, manifest_path: Path) -> dict[str, Any
         str(repository.get("freeze_commit", "")),
         require_head=False,
     )
+    bound_protocol_path = _inside(
+        project_root,
+        Path(str(protocol.get("path", ""))),
+        "Protocol",
+        kind="file",
+    )
+    bound_protocol = load_protocol(bound_protocol_path)
+    is_v3 = int(bound_protocol.get("protocol_version", 1)) == 3
+    additional_artifact_dirs = (
+        (
+            project_root
+            / artifact_paths_for_protocol(bound_protocol)["pilot_matrix"],
+        )
+        if is_v3
+        else ()
+    )
     _assert_runtime_source(
         repo_root,
         project_root.resolve(),
         matrix_dir,
         manifest_path,
         freeze_commit,
+        allow_legacy_artifacts=is_v3,
+        additional_artifact_dirs=additional_artifact_dirs,
     )
     created_at = _parse_aware_timestamp(stored.get("created_at"), "created_at")
     expected = build_manifest(
@@ -691,9 +898,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=PROJECT_ROOT)
     parser.add_argument("--protocol", type=Path, default=Path("configs/protocol.yaml"))
-    parser.add_argument("--signoff", type=Path, default=Path("PREREGISTRATION_SIGNOFF.md"))
-    parser.add_argument("--matrix-dir", type=Path, default=Path("configs/generated"))
-    parser.add_argument("--output", type=Path, default=Path("FREEZE_MANIFEST.json"))
+    parser.add_argument("--signoff", type=Path)
+    parser.add_argument("--matrix-dir", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--freeze-commit",
         help="Required in create mode: explicit 40-character Phase A commit ID",
@@ -714,9 +921,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     project_root = args.project_root.resolve()
     try:
+        protocol_path = args.protocol if args.protocol.is_absolute() else project_root / args.protocol
+        protocol = load_protocol(protocol_path)
+        artifacts = artifact_paths_for_protocol(protocol)
+        signoff_path = args.signoff or Path(artifacts["signoff"])
+        matrix_dir = args.matrix_dir or Path(artifacts["formal_matrix"])
+        output_path = args.output or Path(artifacts["freeze_manifest"])
         if args.verify:
-            verify_manifest(project_root=project_root, manifest_path=args.output)
-            output = _inside(project_root, args.output, "Freeze manifest", kind="file")
+            verify_manifest(project_root=project_root, manifest_path=output_path)
+            output = _inside(project_root, output_path, "Freeze manifest", kind="file")
             print(f"PASS: verified {output}")
             print(f"Freeze manifest SHA-256: {_sha256_file(output)}")
             return 0
@@ -724,14 +937,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise FreezeManifestError("--freeze-commit is required in create mode")
         create_manifest(
             project_root=project_root,
-            protocol_path=args.protocol,
-            signoff_path=args.signoff,
-            matrix_dir=args.matrix_dir,
-            output_path=args.output,
+            protocol_path=protocol_path,
+            signoff_path=signoff_path,
+            matrix_dir=matrix_dir,
+            output_path=output_path,
             freeze_commit=args.freeze_commit,
             repository_url=args.repository_url,
         )
-        output = _inside(project_root, args.output, "Freeze manifest", kind="file")
+        output = _inside(project_root, output_path, "Freeze manifest", kind="file")
         print(f"Created {output}")
         print(f"Freeze manifest SHA-256: {_sha256_file(output)}")
         print("Protocol, confirmations, and author approvals were not modified.")
