@@ -1,22 +1,31 @@
 # TA-LIF-only v3 execution runbook
 
-This runbook is intentionally staged. The checked-in v3 protocol is currently
-unsigned and unfrozen; no v3 training command is authorized yet.
+This runbook is intentionally staged. The checked-in v3 protocol is signed and
+Phase A-frozen. Phase B artifacts do not yet exist. The author freeze permits
+only the isolated Phase B generation, health-gate, and non-reportable pilot
+steps below; formal training remains blocked until the aggregate pilot PASS and
+Phase B freeze manifest are verified.
 
-## Phase A: author/source freeze
+## Phase A: author/source freeze (completed)
 
-1. Review `configs/protocol_v3_talif_only.yaml`, the source changes, the pilot
-   and formal matrix rules, and `PREREGISTRATION_SIGNOFF_V3_TALIF_ONLY.md`.
-2. All three authors complete the checklist and approval evidence. Set
-   `protocol_status.frozen: true`, enter all names and a timezone-aware
-   `confirmed_at`, and replace the sign-off status with the exact signed marker.
-3. Commit only the reviewed protocol/sign-off/source change. Record the full
-   40-character commit ID. Do not include generated v3 matrices or a freeze
-   manifest in this commit.
+1. `configs/protocol_v3_talif_only.yaml`, the source changes, the pilot and
+   formal matrix rules, and `PREREGISTRATION_SIGNOFF_V3_TALIF_ONLY.md` were
+   reviewed.
+2. The user supplied the collective written confirmation on behalf of all three
+   authors. The checklist, approval evidence, names, timezone-aware
+   `confirmed_at`, `protocol_status.frozen: true`, and exact signed marker are
+   complete.
+3. The final Phase A commit contains only the reviewed
+   protocol/sign-off/source change. Generated v3 matrices and the freeze
+   manifest remain absent; record the final 40-character commit ID after this
+   corrected state is committed.
 
 ## Phase B: pilot and generated artifacts
 
-1. In the clean Phase A checkout, run the v3 pilot matrix generator for the
+Entering Phase B authorizes only the non-reportable validation workflow in this
+section. It does not authorize formal training or test-set access.
+
+1. In a clean checkout of the final Phase A commit, run the v3 pilot matrix generator for the
    isolated path `configs/v3_talif_only_pilot_generated`, then generate the
    formal matrix at `configs/v3_talif_only_generated`.
 2. Run the ordinary preflight and verify that the two isolated matrices contain

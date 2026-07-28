@@ -1,19 +1,22 @@
-# TA-LIF-only v3 protocol design draft
+# TA-LIF-only v3 protocol design record
 
 ## Material Passport
 
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: plan
 - Origin Date: 2026-07-28
-- Verification Status: UNVERIFIED AND UNFROZEN
-- Version Label: ta_lif_only_v3_draft_20260728
+- Verification Status: AUTHOR-APPROVED AND PHASE A-FROZEN
+- Version Label: ta_lif_only_v3_phase_a_20260728
 
 ## Design status
 
-This document records the agreed prospective design and accompanies the
-executable but unsigned `configs/protocol_v3_talif_only.yaml`. The design
-choices are fixed for author review, but neither document is an author approval
-or a valid freeze, and neither authorizes GPU work.
+This document records the agreed prospective design accompanying the signed and
+Phase A-frozen `configs/protocol_v3_talif_only.yaml`. The filename retains
+`DRAFT` only for traceability to its pre-sign-off development history; the YAML
+and `PREREGISTRATION_SIGNOFF_V3_TALIF_ONLY.md` are the authoritative current
+records. Phase A permits progression into the isolated Phase B health-gate and
+non-reportable pilot workflow, but it does not authorize formal training or
+test-set access before the aggregate pilot PASS and Phase B freeze manifest.
 
 The historical C1--C4 code and evidence remain intact under
 `MS_RESNET_ROUTE_CLOSURE.md`.
@@ -124,7 +127,7 @@ revision would require a new protocol version, a new unused pilot seed, and a
 new author decision; it is not an automatic retry. These values cannot be
 relaxed after the first dataset-specific health report is created.
 
-## Prespecified analysis contract pending author sign-off
+## Author-approved prespecified analysis contract
 
 For dataset `d` and formal seed `s`, define the paired effect as:
 
@@ -135,8 +138,9 @@ Delta(d, s) = test_accuracy(C2, d, s) - test_accuracy(C1, d, s)
 The estimator is the mean of the five seed-level `Delta` values per dataset.
 This removes the obsolete four-cell difference-in-differences and keeps the
 seed pairing explicit. The design choices below were recorded as confirmed on
-2026-07-28, but they still require genuine review and approval by all three
-authors before the YAML can be frozen or any seed can be consumed.
+2026-07-28 and are bound by the user-attested collective written confirmation
+on behalf of all three authors. The YAML was frozen before any v3 seed was
+consumed.
 
 1. **Dataset role and multiplicity -- confirmed 2026-07-28.** CIFAR-100 is the
    sole confirmatory primary analysis. CIFAR10-DVS is a pre-specified
@@ -179,7 +183,7 @@ authors before the YAML can be frozen or any seed can be consumed.
    any such wording must retain its replication/external-validity status rather
    than presenting a second confirmatory claim.
 
-## Required author sign-off before execution
+## Completed Phase A author sign-off
 
 1. Confirm the C1/C2-only scope and that MS-ResNet is future work only.
 2. Dataset role is confirmed: CIFAR-100 is the sole confirmatory primary;
@@ -200,8 +204,10 @@ authors before the YAML can be frozen or any seed can be consumed.
    pilot schedule, and 0.60 validation threshold are confirmed.
 6. The deterministic SHA-256 rule, two pilot seeds, and five paired formal
    seeds are confirmed. They cannot be regenerated or substituted.
-7. After code and generated configurations are reviewed, complete a new v3
-   author sign-off and freeze. No existing v1/v2 sign-off transfers to v3.
+7. The v3 author sign-off and source freeze are complete before Phase B
+   generates any configuration. Phase B audits the generated configurations
+   before health-gate, pilot, or formal use. No existing v1/v2 sign-off
+   transfers to v3.
 
 ## Implemented isolation boundary
 

@@ -4,8 +4,12 @@
 > for the current paper. C3/C4 and all topology/interaction claims are retained
 > only as code and non-reportable audit evidence for possible future work.
 > Historical files must not be deleted or rewritten. The active work is the
-> unfrozen C1-versus-C2 TA-LIF-only v3 design in
-> `V3_TALIF_ONLY_PROTOCOL_DRAFT.md`; it authorizes no GPU execution. See
+> signed and Phase A-frozen C1-versus-C2 TA-LIF-only v3 protocol in
+> `configs/protocol_v3_talif_only.yaml`. Phase B has not begun: its isolated
+> matrix generation, health gates, and non-reportable pilots must follow
+> `V3_TALIF_ONLY_RUNBOOK.md`. Formal training and test access remain blocked
+> until the aggregate pilot PASS and Phase B freeze manifest are verified. The
+> design record remains in `V3_TALIF_ONLY_PROTOCOL_DRAFT.md`; see
 > `MS_RESNET_ROUTE_CLOSURE.md` for the preservation boundary.
 > The remaining v1/v2 instructions in this README are historical documentation
 > and must not be used to launch v3 work.

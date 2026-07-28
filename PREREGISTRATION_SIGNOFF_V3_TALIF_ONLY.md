@@ -5,8 +5,10 @@ Status: **SIGNED - AUTHOR APPROVALS COMPLETE; PROTOCOL FROZEN**
 This prospective record accompanies `configs/protocol_v3_talif_only.yaml`.
 It does not transfer, reuse, or imply any approval from the historical v1/v2
 protocols. The user supplied collective written confirmation on behalf of all
-three authors for Phase A. Phase B and all runtime gates remain mandatory before
-any GPU health gate, pilot, formal training, or test-set access.
+three authors for Phase A. That author freeze permits only Phase B's isolated
+matrix generation, health gates, and non-reportable pilots under the runtime
+controls below. Formal training and test-set access remain blocked until the
+aggregate pilot validation and Phase B freeze-manifest gates pass.
 
 ## Study identity
 

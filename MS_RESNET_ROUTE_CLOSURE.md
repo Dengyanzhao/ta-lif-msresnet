@@ -60,6 +60,10 @@ before any reportable v3 result is used.
 
 ## Active transition
 
-The active design path is `V3_TALIF_ONLY_PROTOCOL_DRAFT.md`. It defines a
-two-condition C1/C2 study draft only. It is not frozen, it authorizes no GPU
-execution, and it does not alter any legacy protocol.
+The active route is the signed and Phase A-frozen two-condition C1/C2 protocol
+in `configs/protocol_v3_talif_only.yaml`, with
+`V3_TALIF_ONLY_PROTOCOL_DRAFT.md` retained as its design record. Phase B has not
+begun. Its isolated health gates and non-reportable pilots may proceed only
+under `V3_TALIF_ONLY_RUNBOOK.md`; formal training remains blocked until the
+aggregate pilot PASS and Phase B freeze manifest are verified. This route does
+not alter any legacy protocol or historical evidence.

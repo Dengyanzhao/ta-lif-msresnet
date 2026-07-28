@@ -66,6 +66,48 @@ def test_v3_protocol_is_signed_and_isolated(protocol) -> None:
     assert "PENDING" not in signoff
 
 
+def test_v3_active_documents_match_the_signed_phase_a_state() -> None:
+    documents = {
+        "readme": ROOT / "README.md",
+        "runbook": ROOT / "V3_TALIF_ONLY_RUNBOOK.md",
+        "design": ROOT / "V3_TALIF_ONLY_PROTOCOL_DRAFT.md",
+        "closure": ROOT / "MS_RESNET_ROUTE_CLOSURE.md",
+        "signoff": ROOT / V3_ARTIFACT_PATHS["signoff"],
+    }
+    normalized = {
+        name: " ".join(path.read_text(encoding="utf-8").split()).casefold()
+        for name, path in documents.items()
+    }
+
+    assert "signed and phase a-frozen" in normalized["readme"]
+    assert "phase a: author/source freeze (completed)" in normalized["runbook"]
+    assert "author-approved and phase a-frozen" in normalized["design"]
+    assert "signed and phase a-frozen" in normalized["closure"]
+    assert "phase b's isolated matrix generation, health gates" in normalized["signoff"]
+
+    combined = " ".join(normalized.values())
+    stale_claims = (
+        "unfrozen c1-versus-c2 ta-lif-only v3 design",
+        "checked-in v3 protocol is currently unsigned and unfrozen",
+        "verification status: unverified and unfrozen",
+        "executable but unsigned `configs/protocol_v3_talif_only.yaml`",
+        "prespecified analysis contract pending author sign-off",
+        "required author sign-off before execution",
+        "before the yaml can be frozen",
+        "study draft only. it is not frozen",
+        "phase b and all runtime gates remain mandatory before any gpu health gate",
+    )
+    assert not [claim for claim in stale_claims if claim in combined]
+
+    runbook = normalized["runbook"]
+    assert runbook.index("run exactly one dataset-specific v3 health gate") < runbook.index(
+        "create and verify `freeze_manifest_v3_talif_only.json`"
+    )
+    assert runbook.index(
+        "create and verify `freeze_manifest_v3_talif_only.json`"
+    ) < runbook.index("formal execution and analysis")
+
+
 def test_v3_formal_matrix_is_twenty_complete_c1_c2_pairs(protocol) -> None:
     runs = generate_run_matrix(protocol)
 
