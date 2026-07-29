@@ -399,6 +399,65 @@ def _forward(model: torch.nn.Module, inputs: torch.Tensor, collect_activity: boo
     return _reduce_logits(logits, inputs.shape[0]), diagnostics
 
 
+def _accumulate_surrogate_layer_counts(
+    accumulator: Dict[str, Dict[str, float]],
+    diagnostics: Mapping[str, Any],
+) -> None:
+    """Accumulate exact surrogate support counts for each neuron layer."""
+
+    layers = diagnostics.get("layers")
+    if not isinstance(layers, Mapping):
+        return
+    for raw_name, raw_values in layers.items():
+        if not isinstance(raw_values, Mapping):
+            continue
+        active = raw_values.get("surrogate_active")
+        elements = raw_values.get("surrogate_elements")
+        if (
+            not isinstance(active, (int, float))
+            or isinstance(active, bool)
+            or not isinstance(elements, (int, float))
+            or isinstance(elements, bool)
+        ):
+            continue
+        active_value = float(active)
+        element_value = float(elements)
+        if (
+            not math.isfinite(active_value)
+            or not math.isfinite(element_value)
+            or active_value < 0.0
+            or element_value < 0.0
+            or active_value > element_value
+        ):
+            raise RuntimeError(f"Invalid surrogate support counts for layer {raw_name!r}")
+        if element_value == 0.0:
+            continue
+        row = accumulator.setdefault(
+            str(raw_name), {"surrogate_active": 0.0, "surrogate_elements": 0.0}
+        )
+        row["surrogate_active"] += active_value
+        row["surrogate_elements"] += element_value
+
+
+def _surrogate_layer_summary(
+    accumulator: Mapping[str, Mapping[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    """Return per-layer coverage after aggregating counts across batches."""
+
+    result: Dict[str, Dict[str, float]] = {}
+    for name in sorted(accumulator):
+        active = float(accumulator[name]["surrogate_active"])
+        elements = float(accumulator[name]["surrogate_elements"])
+        if elements <= 0.0:
+            continue
+        result[name] = {
+            "surrogate_active": active,
+            "surrogate_elements": elements,
+            "surrogate_coverage": active / elements,
+        }
+    return result
+
+
 def _gradient_norm(model: torch.nn.Module) -> float:
     squared = 0.0
     for parameter in model.parameters():
@@ -510,6 +569,7 @@ def train_one_epoch(
     all_zero_block_gradient_batches = 0
     collect_activity = bool(config.analysis.get("collect_activity", False))
     diagnostics_accumulator: Dict[str, List[float]] = {}
+    surrogate_layer_counts: Dict[str, Dict[str, float]] = {}
     started = time.perf_counter()
     for batch_index, batch in enumerate(loader):
         if _batch_limit_reached(batch_index, config.runtime.limit_batches):
@@ -569,6 +629,8 @@ def train_one_epoch(
             safe = json_safe(value)
             if isinstance(safe, (int, float)) and math.isfinite(float(safe)):
                 diagnostics_accumulator.setdefault(str(key), []).append(float(safe))
+        if collect_activity:
+            _accumulate_surrogate_layer_counts(surrogate_layer_counts, diagnostics)
         if (batch_index + 1) % config.runtime.log_every == 0:
             logger.log(
                 "train_batch", epoch=epoch, batch=batch_index + 1,
@@ -608,7 +670,26 @@ def train_one_epoch(
         "parameter_norms": _parameter_role_norms(model),
         "seconds": elapsed,
     }
-    result["diagnostics"] = {key: float(np.mean(values)) for key, values in diagnostics_accumulator.items()}
+    diagnostic_summary: Dict[str, Any] = {
+        key: float(np.mean(values)) for key, values in diagnostics_accumulator.items()
+    }
+    layer_summary = _surrogate_layer_summary(surrogate_layer_counts)
+    if layer_summary:
+        coverages = [row["surrogate_coverage"] for row in layer_summary.values()]
+        total_active = sum(row["surrogate_active"] for row in layer_summary.values())
+        total_elements = sum(row["surrogate_elements"] for row in layer_summary.values())
+        diagnostic_summary.update(
+            {
+                "surrogate_coverage": total_active / total_elements,
+                "surrogate_coverage_min": min(coverages),
+                "surrogate_coverage_by_layer": layer_summary,
+                "surrogate_aggregation_definition": (
+                    "sum active and observed elements within each neuron layer across "
+                    "train batches, then take the minimum layer coverage"
+                ),
+            }
+        )
+    result["diagnostics"] = diagnostic_summary
     return result
 
 

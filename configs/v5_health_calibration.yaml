@@ -1,0 +1,139 @@
+schema_version: 1
+plan_id: v5_health_design_probe_2026_07_29
+prospective_protocol_version: 5
+plan_status: development_only_not_a_frozen_protocol
+artifact_class: DEVELOPMENT_ONLY_V5_HEALTH_DESIGN_PROBE
+reporting_eligibility: FORBIDDEN_FROM_MANUSCRIPT_RESULTS
+confirmatory_analysis_eligibility: false
+decision_scope: >-
+  GPU integration and control-flow evidence for prospective protocol v5. Natural-data
+  loss and accuracy are descriptive only and cannot be converted into acceptance
+  thresholds from these runs.
+
+design_basis:
+  threshold_source: mechanism_and_numerical_integrity_not_v4_observed_values
+  calibration_role: execution_and_measurement_validation_only
+  threshold_tuning_from_calibration: forbidden
+  pilot_or_formal_seed_consumption: none
+  same_output_overwrite: forbidden
+
+reference:
+  protocol: configs/protocol_v4_talif_only.yaml
+  protocol_file_sha256: 858cebf285d2415d16d14c4b943998005ff8a1a8b79520ad4f55e5577e458ee3
+  protocol_hash: 68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54
+  source_git_commit: 3d29236c80d80ce6d2cf6a594e561137708d7ff9
+  v4_failure_evidence:
+    dataset: cifar100
+    seed: 1975342236
+    receipt: results/pilot/v4_talif_only/health_cifar100_s1975342236.attempt.json
+    receipt_sha256: 8115975674e4e1952f0573f691de887dee142018067c7388bd466220125ab6fb
+    report: results/pilot/v4_talif_only/health_cifar100_s1975342236.json
+    report_sha256: 547ea7b24da9976359605eb67467f89a100b482f3c2728fb2d760564d7f2a4b1
+    expected_receipt_status: ATTEMPT_CLAIMED_SEED_CONSUMED_NO_RETRY
+    expected_report_status: FAIL
+  protected_absent_v4_paths:
+    - results/pilot/v4_talif_only/health_cifar10dvs_s1983855948.attempt.json
+    - results/pilot/v4_talif_only/health_cifar10dvs_s1983855948.json
+    - results/pilot/v4_talif_only/cifar100_s1975342236
+    - results/pilot/v4_talif_only/cifar10dvs_s1983855948
+    - environment/v4_talif_only_pilot_cifar100_s1975342236.json
+    - environment/v4_talif_only_pilot_cifar10dvs_s1983855948.json
+    - results/pilot/v4_talif_only/validation.json
+    - FREEZE_MANIFEST_V4_TALIF_ONLY.json
+    - results/formal_v4_talif_only
+    - results/analysis/v4_talif_only
+
+environment:
+  expected_gpu_substring: RTX 5090
+  pytorch_version: 2.9.1+cu128
+  cuda_runtime: '12.8'
+  precision: float32
+  deterministic: true
+
+conditions: [C1, C2]
+output_root: results/development/v5_health_design_probe
+
+seed_derivation:
+  namespace: ta-lif-msresnet/v5-health-calibration/2026-07-29
+  algorithm: sha256_first_eight_bytes_big_endian_mask_positive_31_bit
+  collision_policy: reject_zero_excluded_or_previous_then_increment_decimal_counter
+  excluded_values:
+    - 11
+    - 22
+    - 33
+    - 44
+    - 55
+    - 77
+    - 88
+    - 314159
+    - 474123945
+    - 799312121
+    - 1882214332
+    - 836017246
+    - 126468528
+    - 2075015328
+    - 419442269
+    - 1033863572
+    - 1367073951
+    - 1975342236
+    - 1983855948
+    - 375760402
+    - 595643067
+    - 671880744
+    - 1045910319
+    - 615268440
+    - 1230259817
+    - 1487387499
+    - 856172396
+    - 1846577336
+    - 1248366457
+    - 874085245
+    - 2019339204
+
+fixed_batch_probe:
+  batch_size: 8
+  observation_steps: [0, 80, 160, 320, 640]
+  optimizer_regime: base_lr_without_warmup_scheduler_steps
+  c2_ta_state: enabled_for_gradient_and_route_probe
+  learning_metrics_role: descriptive_only_no_pass_fail_threshold
+  minimum_ta_routed_gradient_coverage_observation: 0.0
+
+formal_schedule_probe:
+  epochs: 8
+  train_batches_per_epoch: 16
+  validation_batches_per_epoch: 4
+  use_frozen_v4_optimizer_schedule: true
+  required_activation_epoch_zero_based: 5
+  required_pre_activation_epochs: [0, 1, 2, 3, 4]
+  required_post_activation_epochs: [5, 6, 7]
+  learning_metrics_role: descriptive_only_no_pass_fail_threshold
+
+datasets:
+  cifar100:
+    reference_config: configs/v4_talif_only_pilot_generated/E1_cifar100_d20_t6_C1_s1975342236.yaml
+    reference_config_file_sha256: 7b6fd7e24178284eb5916f863e76514cde9a3c9817b6c436e583026ebb93fd04
+    default_output: results/development/v5_health_design_probe/cifar100_attempt01.json
+    fixed_batch_seed:
+      label: cifar100|fixed-batch
+      counter: 0
+      input_sha256: d8804c33da52016fda950aa1aee7b3e8fb9d24dbba0cf39e590ff475c3bdd06c
+      value: 1515323759
+    formal_schedule_seed:
+      label: cifar100|formal-schedule
+      counter: 0
+      input_sha256: bff2a3ec0cc77f794f06102f30f3f3a36d19a7082ec2b288eed3c5bf425a014e
+      value: 214400889
+  cifar10dvs:
+    reference_config: configs/v4_talif_only_pilot_generated/E1_cifar10dvs_d20_t10_C1_s1983855948.yaml
+    reference_config_file_sha256: 1a7ffc3bb1452edd5e676193dc4b579b3c0dccf5db76f984d653005600777227
+    default_output: results/development/v5_health_design_probe/cifar10dvs_attempt01.json
+    fixed_batch_seed:
+      label: cifar10dvs|fixed-batch
+      counter: 0
+      input_sha256: 3b5de0020701f8d06f749e67655deebc296ab9b17c2f4df50d8a6f7f0737bfd6
+      value: 117569744
+    formal_schedule_seed:
+      label: cifar10dvs|formal-schedule
+      counter: 0
+      input_sha256: 69f497dca199653d88b3ac9ef14fb175e5d13fb5bb25da8ad16a2313d701545d
+      value: 563701053
