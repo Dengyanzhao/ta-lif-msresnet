@@ -32,6 +32,7 @@ from talif_msresnet.config import (  # noqa: E402
     generate_run_matrix,
     generate_v3_pilot_matrix,
     generate_v4_pilot_matrix,
+    generate_v5_pilot_matrix,
     load_protocol,
     validate_run_mapping,
 )
@@ -92,8 +93,10 @@ def _matrix_runs(
         return generate_v3_pilot_matrix(protocol)
     if version == 4:
         return generate_v4_pilot_matrix(protocol)
+    if version == 5:
+        return generate_v5_pilot_matrix(protocol)
     raise ValueError(
-        "Pilot matrix generation through this mode requires protocol v3 or v4"
+        "Pilot matrix generation through this mode requires protocol v3, v4, or v5"
     )
 
 
@@ -162,7 +165,7 @@ def _publish_staged_directory(staging_dir: Path, output_dir: Path) -> None:
         _remove_path(backup_dir)
 
 
-def _generate_v4_transactionally(
+def _generate_isolated_transactionally(
     protocol_path: str | Path,
     protocol: Mapping[str, Any],
     runs: Sequence[Mapping[str, Any]],
@@ -171,7 +174,7 @@ def _generate_v4_transactionally(
 ) -> None:
     if not output_dir.parent.is_dir():
         raise ValueError(
-            f"The isolated v4 matrix parent directory does not exist: {output_dir.parent}"
+            f"The isolated matrix parent directory does not exist: {output_dir.parent}"
         )
     staging_dir = Path(
         tempfile.mkdtemp(
@@ -203,22 +206,24 @@ def generate(
     if stage not in {"formal", "pilot"}:
         raise ValueError("stage must be formal or pilot")
     output_dir = Path(output_dir)
-    if protocol["protocol_version"] == 4:
+    if protocol["protocol_version"] in (4, 5):
         expected_output = _expected_matrix_dir(protocol, stage=stage)
         if output_dir.resolve() != expected_output:
             raise ValueError(
-                f"Protocol v4 {stage} generation must use its isolated matrix path: "
+                f"Protocol v{protocol['protocol_version']} {stage} generation must use "
+                "its isolated matrix path: "
                 f"{expected_output}"
             )
     runs = _matrix_runs(protocol, stage=stage)
     resolved_runs = [validate_run_mapping(run, protocol) for run in runs]
-    if protocol["protocol_version"] == 4:
+    if protocol["protocol_version"] in (4, 5):
         expected_count = 4 if stage == "pilot" else 20
         if len(resolved_runs) != expected_count:
             raise ValueError(
-                f"Protocol v4 {stage} matrix must contain exactly {expected_count} runs"
+                f"Protocol v{protocol['protocol_version']} {stage} matrix must contain "
+                f"exactly {expected_count} runs"
             )
-        _generate_v4_transactionally(
+        _generate_isolated_transactionally(
             protocol_path,
             protocol,
             runs,
@@ -260,14 +265,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         help=(
             "Generated matrix directory. Defaults to configs/generated for legacy "
-            "protocols and to the isolated artifact_paths matrix for protocols v3/v4."
+            "protocols and to the isolated artifact_paths matrix for protocols v3/v4/v5."
         ),
     )
     parser.add_argument(
         "--stage",
         choices=("formal", "pilot"),
         default="formal",
-        help="Generate the formal matrix or a protocol-v3/v4 non-reportable pilot matrix",
+        help="Generate the formal matrix or a protocol-v3/v4/v5 non-reportable pilot matrix",
     )
     parser.add_argument(
         "--dry-run",
@@ -284,12 +289,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output is None:
         output = (
             PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
-            if protocol["protocol_version"] in (3, 4)
+            if protocol["protocol_version"] in (3, 4, 5)
             else PROJECT_ROOT / "configs" / "generated"
         )
     else:
         output = Path(args.output)
-    if protocol["protocol_version"] in (3, 4):
+    if protocol["protocol_version"] in (3, 4, 5):
         expected_output = (
             PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
         ).resolve()

@@ -21,6 +21,25 @@ V4_GATE_SOURCE_PATHS = frozenset(
         "scripts/validate_v4_pilot.py",
     }
 )
+V5_GATE_SOURCE_PATHS = frozenset(
+    {
+        "src/talif_msresnet/pilot_v3.py",
+        "src/talif_msresnet/pilot_v4.py",
+        "src/talif_msresnet/pilot_v5.py",
+        "src/talif_msresnet/statistics_v3.py",
+        "src/talif_msresnet/statistics_v5.py",
+        "scripts/analyze_v3_results.py",
+        "scripts/analyze_v5_results.py",
+        "scripts/calibrate_v5_health.py",
+        "scripts/evaluate_checkpoints.py",
+        "scripts/pilot_health_gate.py",
+        "scripts/pilot_health_gate_v3.py",
+        "scripts/pilot_health_gate_v5.py",
+        "scripts/validate_v3_pilot.py",
+        "scripts/validate_v5_pilot.py",
+    }
+)
+_LOWER_HEX = frozenset("0123456789abcdef")
 
 
 class FreezeGateError(RuntimeError):
@@ -56,6 +75,14 @@ def _bound_path(project_root: Path, value: Any, label: str) -> Path:
     except ValueError as exc:
         raise FreezeGateError(f"Freeze manifest {label} path escapes the project root") from exc
     return resolved
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and set(value).issubset(_LOWER_HEX)
+    )
 
 
 def verify_formal_freeze(
@@ -105,36 +132,78 @@ def verify_formal_freeze(
                 "Requested configuration directory is not the manifest-bound matrix: "
                 f"{requested_matrix} != {bound_matrix}"
             )
-    if int(protocol_mapping.get("protocol_version", 1)) == 4:
+    version = int(protocol_mapping.get("protocol_version", 1))
+    if version in (4, 5):
         pilot_record = stored.get("pilot_validation")
         gate_sources = stored.get("gate_sources")
+        required_sources = (
+            V4_GATE_SOURCE_PATHS if version == 4 else V5_GATE_SOURCE_PATHS
+        )
+        validator_path = f"scripts/validate_v{version}_pilot.py"
         if not isinstance(pilot_record, Mapping):
             raise FreezeGateError(
-                "Protocol v4 formal release has no bound aggregate pilot validation"
+                f"Protocol v{version} formal release has no bound aggregate pilot validation"
             )
         if pilot_record.get("status") != "PASS" or pilot_record.get("pass") is not True:
             raise FreezeGateError(
-                "Protocol v4 formal release is not bound to an aggregate pilot PASS"
+                f"Protocol v{version} formal release is not bound to an aggregate pilot PASS"
             )
         if pilot_record.get("protocol_hash") != protocol_record.get("canonical_sha256"):
             raise FreezeGateError(
-                "Protocol v4 pilot validation is bound to a different protocol hash"
+                f"Protocol v{version} pilot validation is bound to a different protocol hash"
             )
-        if not isinstance(gate_sources, Mapping) or set(gate_sources) != V4_GATE_SOURCE_PATHS:
+        if version == 5:
+            expected_artifact_class = "NON_REPORTABLE_V5_TALIF_ONLY_PILOT_ACCEPTANCE"
+            if pilot_record.get("artifact_class") != expected_artifact_class:
+                raise FreezeGateError(
+                    "Protocol v5 formal release is not bound to the aggregate pilot artifact"
+                )
+            training_environment_sha256 = pilot_record.get(
+                "training_environment_sha256"
+            )
+            if not _is_sha256(training_environment_sha256):
+                raise FreezeGateError(
+                    "Protocol v5 freeze manifest has no valid pilot-bound "
+                    "training_environment_sha256"
+                )
+            datasets = pilot_record.get("datasets")
+            if not isinstance(datasets, Mapping) or set(datasets) != {
+                "cifar100",
+                "cifar10dvs",
+            }:
+                raise FreezeGateError(
+                    "Protocol v5 freeze manifest does not bind both pilot datasets"
+                )
+            for dataset, evidence in datasets.items():
+                if (
+                    not isinstance(evidence, Mapping)
+                    or evidence.get("status") != "PASS"
+                    or evidence.get("pass") is not True
+                    or evidence.get("environment_sha256")
+                    != training_environment_sha256
+                ):
+                    raise FreezeGateError(
+                        "Protocol v5 freeze manifest has an inconsistent aggregate "
+                        f"pilot/environment binding for {dataset}"
+                    )
+        if not isinstance(gate_sources, Mapping) or set(gate_sources) != required_sources:
             raise FreezeGateError(
-                "Protocol v4 freeze manifest does not bind the complete v4 gate source set"
+                f"Protocol v{version} freeze manifest does not bind the complete "
+                f"v{version} gate source set"
             )
         validator = pilot_record.get("validator")
-        validator_source = gate_sources.get("scripts/validate_v4_pilot.py")
+        validator_source = gate_sources.get(validator_path)
         if not isinstance(validator, Mapping) or not isinstance(
             validator_source, Mapping
         ):
-            raise FreezeGateError("Protocol v4 validator source binding is malformed")
+            raise FreezeGateError(
+                f"Protocol v{version} validator source binding is malformed"
+            )
         if (
-            validator.get("path") != "scripts/validate_v4_pilot.py"
+            validator.get("path") != validator_path
             or validator.get("sha256") != validator_source.get("file_sha256")
         ):
             raise FreezeGateError(
-                "Protocol v4 pilot validator differs from the manifest-bound source"
+                f"Protocol v{version} pilot validator differs from the manifest-bound source"
             )
     return stored

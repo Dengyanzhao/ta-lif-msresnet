@@ -416,10 +416,10 @@ def check_protocol(
             "Protocol contains agreed draft values but is unsigned and unfrozen; "
             "formal training remains blocked"
         )
-    # v4 Phase A is an executable author freeze for health/pilot work.  Older
+    # v4/v5 Phase A is an executable author freeze for health/pilot work. Older
     # pilot protocols intentionally retain their historical unfrozen behavior.
     author_freeze_required = mode in {"full", "final-test"} or (
-        protocol_version == 4 and mode == "pilot"
+        protocol_version in (4, 5) and mode == "pilot"
     )
     if author_freeze_required:
         if status.get("frozen") is not True:
@@ -454,7 +454,7 @@ def check_protocol(
         for dataset in sorted(matrix_datasets):
             if thresholds.get(dataset) is None:
                 errors.append(f"analysis.validation_accuracy_thresholds.{dataset} must be frozen")
-        if protocol_version in (3, 4):
+        if protocol_version in (3, 4, 5):
             primary_test = analysis.get("primary_accuracy_test", {})
             if not isinstance(primary_test, Mapping):
                 errors.append(

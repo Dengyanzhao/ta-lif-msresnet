@@ -79,6 +79,22 @@ V4_REQUIRED_SOURCE_PATHS = (
     "scripts/pilot_health_gate_v4.py",
     "scripts/validate_v4_pilot.py",
 )
+V5_REQUIRED_SOURCE_PATHS = (
+    "src/talif_msresnet/pilot_v3.py",
+    "src/talif_msresnet/pilot_v4.py",
+    "src/talif_msresnet/pilot_v5.py",
+    "src/talif_msresnet/statistics_v3.py",
+    "src/talif_msresnet/statistics_v5.py",
+    "scripts/analyze_v3_results.py",
+    "scripts/analyze_v5_results.py",
+    "scripts/calibrate_v5_health.py",
+    "scripts/evaluate_checkpoints.py",
+    "scripts/pilot_health_gate.py",
+    "scripts/pilot_health_gate_v3.py",
+    "scripts/pilot_health_gate_v5.py",
+    "scripts/validate_v3_pilot.py",
+    "scripts/validate_v5_pilot.py",
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REMOTE_RE = re.compile(r"^(?:https?://|ssh://|git://|git@[^:]+:).+", re.IGNORECASE)
@@ -355,7 +371,7 @@ def _parse_aware_timestamp(value: Any, label: str) -> str:
     return normalized
 
 
-def _v4_responsible_author(confirmed_by: Any) -> str:
+def _accountable_responsible_author(confirmed_by: Any, *, version: int) -> str:
     if not isinstance(confirmed_by, str) or not confirmed_by.strip():
         raise FreezeManifestError(
             "protocol_status.confirmed_by must identify the accountable author"
@@ -367,7 +383,7 @@ def _v4_responsible_author(confirmed_by: Any) -> str:
     ]
     if prohibited:
         raise FreezeManifestError(
-            "Protocol v4 must not claim unrecorded co-author approval in "
+            f"Protocol v{version} must not claim unrecorded co-author approval in "
             "protocol_status.confirmed_by: " + ", ".join(prohibited)
         )
     responsible = normalized.split("(", 1)[0].strip()
@@ -376,6 +392,12 @@ def _v4_responsible_author(confirmed_by: Any) -> str:
             "protocol_status.confirmed_by has no accountable-author identity"
         )
     return responsible
+
+
+def _v4_responsible_author(confirmed_by: Any) -> str:
+    """Backward-compatible wrapper retained for the v4 release tests."""
+
+    return _accountable_responsible_author(confirmed_by, version=4)
 
 
 def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
@@ -400,8 +422,10 @@ def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
         raise FreezeManifestError("protocol_status.confirmed_by must identify the human reviewers")
     version = int(protocol.get("protocol_version", 1))
     responsible_author: str | None = None
-    if version == 4:
-        responsible_author = _v4_responsible_author(confirmed_by)
+    if version in (4, 5):
+        responsible_author = _accountable_responsible_author(
+            confirmed_by, version=version
+        )
     else:
         absent = [
             name
@@ -422,7 +446,7 @@ def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validate_signoff(text: str, protocol: Mapping[str, Any]) -> None:
     version = int(protocol.get("protocol_version", 1))
-    expected_status = V4_SIGNED_STATUS if version == 4 else SIGNED_STATUS
+    expected_status = V4_SIGNED_STATUS if version in (4, 5) else SIGNED_STATUS
     status_lines = re.findall(r"^Status:.*$", text, flags=re.MULTILINE)
     if status_lines != [expected_status]:
         raise FreezeManifestError(
@@ -435,24 +459,26 @@ def _validate_signoff(text: str, protocol: Mapping[str, Any]) -> None:
         pattern = rf"^- \[[xX]\] `{re.escape(field)}`:"
         if re.search(pattern, text, flags=re.MULTILINE) is None:
             raise FreezeManifestError(f"Author checklist item is not checked: {field}")
-    if version == 4:
+    if version in (4, 5):
         status = protocol.get("protocol_status", {})
         confirmed_by = status.get("confirmed_by") if isinstance(status, Mapping) else None
-        responsible = _v4_responsible_author(confirmed_by)
+        responsible = _accountable_responsible_author(
+            confirmed_by, version=version
+        )
         authorizer = (
             rf"^- Authorizer: {re.escape(responsible)}, accountable author and "
             rf"Codex task user\s*$"
         )
         if re.search(authorizer, text, flags=re.MULTILINE) is None:
             raise FreezeManifestError(
-                "Protocol v4 sign-off does not identify the protocol-bound "
+                f"Protocol v{version} sign-off does not identify the protocol-bound "
                 "accountable author"
             )
         for name in ("Peng Yan", "Song Wang"):
             disclosure = rf"^- Independent approval from {re.escape(name)}: not asserted in this record\s*$"
             if re.search(disclosure, text, flags=re.MULTILINE) is None:
                 raise FreezeManifestError(
-                    f"Protocol v4 sign-off must explicitly avoid asserting approval from {name}"
+                    f"Protocol v{version} sign-off must explicitly avoid asserting approval from {name}"
                 )
             fabricated = (
                 rf"^- {re.escape(name)}(?:, corresponding author)? - "
@@ -460,7 +486,7 @@ def _validate_signoff(text: str, protocol: Mapping[str, Any]) -> None:
             )
             if re.search(fabricated, text, flags=re.MULTILINE | re.IGNORECASE):
                 raise FreezeManifestError(
-                    f"Protocol v4 sign-off contains unrecorded approval evidence for {name}"
+                    f"Protocol v{version} sign-off contains unrecorded approval evidence for {name}"
                 )
         return
     for signer in EXPECTED_SIGNERS:
@@ -711,6 +737,149 @@ def _validate_v4_pilot_acceptance(
     }
 
 
+def _validate_v5_pilot_acceptance(
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    project_root: Path,
+) -> dict[str, Any]:
+    """Re-run the v5 validator and bind its exact two-dataset aggregate PASS."""
+
+    acceptance = protocol.get("pilot_acceptance")
+    if not isinstance(acceptance, Mapping):
+        raise FreezeManifestError("Protocol v5 has no pilot_acceptance mapping")
+    validation_value = acceptance.get("validation_output")
+    if not isinstance(validation_value, str) or not validation_value.strip():
+        raise FreezeManifestError("Protocol v5 has no pilot validation output path")
+    validation_path = _inside(
+        project_root,
+        validation_value,
+        "V5 pilot validation",
+        kind="file",
+    )
+    stored = dict(_read_json(validation_path, "v5 pilot validation"))
+
+    validator_path = project_root / "scripts" / "validate_v5_pilot.py"
+    if not validator_path.is_file():
+        raise FreezeManifestError(f"V5 pilot validator is missing: {validator_path}")
+    spec = importlib.util.spec_from_file_location(
+        "talif_freeze_v5_pilot_validator", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise FreezeManifestError("Cannot load the v5 pilot validator")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise FreezeManifestError(
+            f"Cannot import the v5 pilot validator: {type(exc).__name__}: {exc}"
+        ) from exc
+    validate_pilot = getattr(module, "validate_pilot", None)
+    if not callable(validate_pilot):
+        raise FreezeManifestError("V5 pilot validator has no validate_pilot entry point")
+
+    expected_top = {
+        "schema_version": 1,
+        "artifact_class": "NON_REPORTABLE_V5_TALIF_ONLY_PILOT_ACCEPTANCE",
+        "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
+        "confirmatory_analysis_eligibility": False,
+        "status": "PASS",
+        "pass": True,
+        "decision": "ACCEPT_V5_TALIF_ONLY_120_EPOCH_PILOTS_RELEASE_FORMAL_FREEZE",
+        "exit_code": 0,
+        "protocol_hash": _stable_hash(protocol),
+        "acceptance_hash": _stable_hash(dict(acceptance)),
+    }
+    mismatches = [
+        key for key, expected in expected_top.items() if stored.get(key) != expected
+    ]
+    datasets = stored.get("datasets")
+    dataset_names = ("cifar100", "cifar10dvs")
+    if not isinstance(datasets, Mapping) or set(datasets) != set(dataset_names):
+        mismatches.append("datasets")
+    elif any(
+        not isinstance(datasets[name], Mapping)
+        or datasets[name].get("status") != "PASS"
+        or datasets[name].get("pass") is not True
+        for name in dataset_names
+    ):
+        mismatches.append("dataset PASS states")
+    if stored.get("integrity_failures") != [] or stored.get("threshold_failures") != []:
+        mismatches.append("failure records")
+    training_environment_sha256 = stored.get("training_environment_sha256")
+    if not isinstance(training_environment_sha256, str) or SHA256_RE.fullmatch(
+        training_environment_sha256
+    ) is None:
+        mismatches.append("training_environment_sha256")
+    elif isinstance(datasets, Mapping):
+        dataset_environment_hashes = {
+            evidence.get("environment_sha256")
+            for evidence in datasets.values()
+            if isinstance(evidence, Mapping)
+        }
+        if dataset_environment_hashes != {training_environment_sha256}:
+            mismatches.append("dataset training environment bindings")
+    if mismatches:
+        raise FreezeManifestError(
+            "V5 pilot validation is not an exact aggregate PASS: "
+            + ", ".join(mismatches)
+        )
+
+    try:
+        current = validate_pilot(
+            protocol_path=protocol_path,
+            config_dir=project_root
+            / artifact_paths_for_protocol(protocol)["pilot_matrix"],
+            repository_root=project_root,
+        )
+    except Exception as exc:
+        raise FreezeManifestError(
+            f"Current v5 pilot artifacts fail revalidation: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(current, Mapping):
+        raise FreezeManifestError("V5 pilot validator returned a non-mapping result")
+    stored_comparable = dict(stored)
+    current_comparable = dict(current)
+    stored_comparable.pop("validated_at", None)
+    current_comparable.pop("validated_at", None)
+    if stored_comparable != current_comparable:
+        raise FreezeManifestError(
+            "Stored v5 pilot validation differs from the current pilot artifacts"
+        )
+
+    assert isinstance(datasets, Mapping)
+    dataset_evidence: dict[str, Any] = {}
+    for name in dataset_names:
+        evidence = datasets[name]
+        assert isinstance(evidence, Mapping)
+        dataset_evidence[name] = {
+            "status": evidence.get("status"),
+            "pass": evidence.get("pass"),
+            "health_seed": evidence.get("health_seed"),
+            "pilot_seed": evidence.get("pilot_seed"),
+            **{
+                str(key): value
+                for key, value in evidence.items()
+                if isinstance(key, str) and key.endswith("_sha256")
+            },
+        }
+    return {
+        "artifact_class": stored.get("artifact_class"),
+        "status": "PASS",
+        "pass": True,
+        "path": validation_path.relative_to(project_root).as_posix(),
+        "sha256": _sha256_file(validation_path),
+        "protocol_hash": stored["protocol_hash"],
+        "acceptance_hash": stored["acceptance_hash"],
+        "validated_at": stored.get("validated_at"),
+        "training_environment_sha256": training_environment_sha256,
+        "validator": {
+            "path": validator_path.relative_to(project_root).as_posix(),
+            "sha256": _sha256_file(validator_path),
+        },
+        "datasets": dataset_evidence,
+    }
+
+
 def _manifest_row(resolved: Any, config_path: Path) -> dict[str, Any]:
     return {
         "run_id": resolved.runtime.run_id,
@@ -864,7 +1033,8 @@ def build_manifest(
     version = int(protocol.get("protocol_version", 1))
     is_v3 = version == 3
     is_v4 = version == 4
-    is_talif_only = version in (3, 4)
+    is_v5 = version == 5
+    is_talif_only = version in (3, 4, 5)
     artifacts = artifact_paths_for_protocol(protocol)
     if is_talif_only:
         expected_paths = {
@@ -901,6 +1071,10 @@ def build_manifest(
         pilot_validation = _validate_v4_pilot_acceptance(
             protocol, protocol_path, project_root
         )
+    elif is_v5:
+        pilot_validation = _validate_v5_pilot_acceptance(
+            protocol, protocol_path, project_root
+        )
     else:
         pilot_validation = None
 
@@ -916,6 +1090,8 @@ def build_manifest(
         required_sources = (*REQUIRED_SOURCE_PATHS, *V3_REQUIRED_SOURCE_PATHS)
     elif is_v4:
         required_sources = (*REQUIRED_SOURCE_PATHS, *V4_REQUIRED_SOURCE_PATHS)
+    elif is_v5:
+        required_sources = (*REQUIRED_SOURCE_PATHS, *V5_REQUIRED_SOURCE_PATHS)
     else:
         required_sources = REQUIRED_SOURCE_PATHS
     committed_gate_sources: dict[str, bytes] = {}
@@ -926,7 +1102,9 @@ def build_manifest(
         committed_source = _assert_committed_text(
             repo_root, commit, source_path, f"Required source {relative}"
         )
-        if is_v4 and relative in V4_REQUIRED_SOURCE_PATHS:
+        if (is_v4 and relative in V4_REQUIRED_SOURCE_PATHS) or (
+            is_v5 and relative in V5_REQUIRED_SOURCE_PATHS
+        ):
             committed_gate_sources[relative] = committed_source
     if require_creation_state:
         additional_artifact_dirs = (
@@ -976,13 +1154,16 @@ def build_manifest(
     }
     if pilot_validation is not None:
         manifest["pilot_validation"] = pilot_validation
-    if is_v4:
+    if is_v4 or is_v5:
+        gate_source_paths = (
+            V4_REQUIRED_SOURCE_PATHS if is_v4 else V5_REQUIRED_SOURCE_PATHS
+        )
         manifest["gate_sources"] = {
             relative: {
                 "path": relative,
                 "file_sha256": _sha256_bytes(committed_gate_sources[relative]),
             }
-            for relative in V4_REQUIRED_SOURCE_PATHS
+            for relative in gate_source_paths
         }
     return manifest
 
@@ -1088,7 +1269,7 @@ def verify_manifest(*, project_root: Path, manifest_path: Path) -> dict[str, Any
     )
     bound_protocol = load_protocol(bound_protocol_path)
     bound_version = int(bound_protocol.get("protocol_version", 1))
-    is_talif_only = bound_version in (3, 4)
+    is_talif_only = bound_version in (3, 4, 5)
     additional_artifact_dirs = (
         (
             project_root

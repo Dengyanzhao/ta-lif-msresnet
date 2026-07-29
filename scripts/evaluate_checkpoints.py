@@ -34,8 +34,8 @@ from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
 from talif_msresnet.preflight import check_protocol  # noqa: E402
 from talif_msresnet.train import (  # noqa: E402
     SEED_METRIC_FIELDS,
+    _formal_execution_evidence,
     _training_environment_identity,
-    _v4_formal_execution_evidence,
     evaluate,
 )
 from talif_msresnet.utils import (  # noqa: E402
@@ -114,8 +114,10 @@ def _audit_consolidated_metrics(
     rows: list[dict[str, str]],
     results_root: Path,
     recovery_run: str | None = None,
+    *,
+    expected_training_environment_sha256: str | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Bind the consolidated CSV to every planned run ID and hash."""
+    """Bind every result record to the plan and frozen training environment."""
 
     path = results_root / "seed_metrics.csv"
     if not path.exists():
@@ -164,6 +166,10 @@ def _audit_consolidated_metrics(
             continue
         manifest_config = manifest.get("config", {})
         manifest_analysis = manifest_config.get("analysis", {}) if isinstance(manifest_config, Mapping) else {}
+        manifest_environment = manifest.get("environment", {})
+        manifest_environment = (
+            manifest_environment if isinstance(manifest_environment, Mapping) else {}
+        )
         comparisons = {
             "config_hash": (
                 metric.get("config_hash", ""), per_run.get("config_hash", ""),
@@ -188,6 +194,24 @@ def _audit_consolidated_metrics(
             normalized = {str(value) for value in values}
             if len(normalized) != 1 or "" in normalized:
                 errors.append(f"{run_id}: {field} differs across plan/consolidated/per-run/manifest")
+        if expected_training_environment_sha256 is not None:
+            environment_bindings = {
+                "consolidated seed_metrics.csv": metric.get(
+                    "training_environment_sha256", ""
+                ),
+                "per-run seed_metrics.json": per_run.get(
+                    "training_environment_sha256", ""
+                ),
+                "run_manifest.json environment.training_environment_sha256": (
+                    manifest_environment.get("training_environment_sha256", "")
+                ),
+            }
+            for source, observed in environment_bindings.items():
+                if str(observed) != expected_training_environment_sha256:
+                    errors.append(
+                        f"{run_id}: {source} differs from the freeze-bound "
+                        "training_environment_sha256"
+                    )
 
         marker_exists = (results_root / run_id / "final_test.json").exists()
         marker_test_values: dict[str, Any] = {}
@@ -562,7 +586,8 @@ def main(argv: list[str] | None = None) -> int:
     results_root = Path(args.results_root or default_results).resolve()
     config_dir = Path(args.config_dir or default_configs).resolve()
     protocol_version = int(protocol.get("protocol_version", 1))
-    if protocol_version in (3, 4):
+    expected_training_environment_sha256: str | None = None
+    if protocol_version in (3, 4, 5):
         if results_root != default_results.resolve():
             raise SystemExit(
                 f"Protocol v{protocol_version} final test must use "
@@ -573,13 +598,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"Protocol v{protocol_version} final test must use "
                 "artifact_paths.formal_matrix"
             )
-    if protocol_version == 4:
+    if protocol_version in (4, 5):
         freeze_manifest = verify_formal_freeze(
             project_root=PROJECT_ROOT,
             protocol_path=args.protocol,
             matrix_dir=config_dir,
         )
-        execution_evidence = _v4_formal_execution_evidence(
+        execution_evidence = _formal_execution_evidence(
             protocol,
             freeze_manifest,
             protocol_path=args.protocol,
@@ -593,13 +618,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         if environment_sha256 != execution_evidence["training_environment_sha256"]:
             raise SystemExit(
-                "Protocol v4 final-test environment differs from the pilot/formal freeze"
+                f"Protocol v{protocol_version} final-test environment differs from "
+                "the pilot/formal freeze"
             )
+        expected_training_environment_sha256 = str(
+            execution_evidence["training_environment_sha256"]
+        )
     rows = _read_expected(
         config_dir,
         expected_count=expected_run_count_for_protocol(protocol),
     )
-    _audit_consolidated_metrics(rows, results_root, recovery_run=args.recover_run)
+    _audit_consolidated_metrics(
+        rows,
+        results_root,
+        recovery_run=args.recover_run,
+        expected_training_environment_sha256=expected_training_environment_sha256,
+    )
     if args.recover_run:
         planned_ids = {row["run_id"] for row in rows}
         if args.recover_run not in planned_ids:

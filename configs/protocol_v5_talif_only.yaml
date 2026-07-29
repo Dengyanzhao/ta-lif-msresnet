@@ -1,0 +1,451 @@
+protocol_version: 5
+study_stage: pilot_and_formal
+active_conditions: [C1, C2]
+
+# Dataset-specific formal seeds were prospectively derived from the namespace
+# and records frozen in seed_ledger. Each seed belongs to one dataset only; the
+# matching C1/C2 runs form a paired block.
+seeds:
+  - 2141022414
+  - 252611743
+  - 1147962214
+  - 931150728
+  - 2106521224
+  - 157805125
+  - 2131477013
+  - 1311303835
+  - 417519743
+  - 2086335735
+output_root: results/formal_v5_talif_only
+
+artifact_paths:
+  protocol: configs/protocol_v5_talif_only.yaml
+  signoff: PREREGISTRATION_SIGNOFF_V5_TALIF_ONLY.md
+  formal_matrix: configs/v5_talif_only_generated
+  pilot_matrix: configs/v5_talif_only_pilot_generated
+  freeze_manifest: FREEZE_MANIFEST_V5_TALIF_ONLY.json
+  formal_results: results/formal_v5_talif_only
+  pilot_results: results/pilot/v5_talif_only
+  analysis_results: results/analysis/v5_talif_only
+
+protocol_status:
+  frozen: true
+  confirmed_by: Yanzhao Deng (accountable author and Codex task user)
+  confirmed_at: "2026-07-29T21:10:31+08:00"
+  notes: >-
+    Protocol v4 terminated after its consumed CIFAR-100 health failure. The
+    accountable author and Codex task user then authorized completion of the
+    prerequisites. Two development-only v5 design probes completed at commit
+    609a505445d68e9961778999b5f7a4bc79cc83a8 without integrity anomalies.
+    Their natural-data learning metrics were descriptive and were not used to
+    set any v5 health criterion. V5 health is a deterministic implementation
+    gate with no performance threshold. Health, pilot, formal, bootstrap, and
+    development seed identities are mutually disjoint. Formal execution stays
+    blocked until both one-shot health gates and all four 120-epoch pilots pass
+    and the v5 freeze manifest verifies.
+  confirmations:
+    talif_only_dual_dataset_scope: true
+    terminal_neuron_graph: true
+    optimizer_and_scheduler: true
+    ta_activation_contract: true
+    data_preprocessing_and_splits: true
+    development_probe_evidence: true
+    deterministic_health_and_pilot_gates: true
+    disjoint_seed_ledger: true
+    paired_accuracy_analysis_and_claim_gates: true
+    environment_and_run_handling: true
+    model_selection_and_one_time_test_access: true
+
+seed_ledger:
+  namespace: ta-lif-msresnet/v5-author-freeze/2026-07-29
+  algorithm: sha256_first_eight_bytes_big_endian_mask_positive_31_bit
+  collision_policy: reject_zero_excluded_or_previous_then_increment_decimal_counter
+  excluded_values:
+    - 11
+    - 22
+    - 33
+    - 44
+    - 55
+    - 77
+    - 88
+    - 2024
+    - 314159
+    - 20260719
+    - 474123945
+    - 799312121
+    - 1882214332
+    - 836017246
+    - 126468528
+    - 2075015328
+    - 419442269
+    - 1033863572
+    - 1367073951
+    - 1975342236
+    - 1983855948
+    - 375760402
+    - 595643067
+    - 671880744
+    - 1045910319
+    - 615268440
+    - 1230259817
+    - 1487387499
+    - 856172396
+    - 1846577336
+    - 1248366457
+    - 874085245
+    - 2019339204
+    - 1515323759
+    - 214400889
+    - 117569744
+    - 563701053
+  datasets:
+    cifar100:
+      health:
+        label: health|cifar100|1
+        counter: 0
+        input_sha256: 0b6f1d83b57a5b2c533c82d01a25888448d65d6591d4101bcb10768ee2c2fa53
+        value: 897211180
+      pilot:
+        label: pilot|cifar100|1
+        counter: 0
+        input_sha256: 8e7a2319f557d3df1f4dbc306e4cc143d2d387305e91a7c93c28bc036ae153b4
+        value: 1968690143
+      formal:
+        - {label: 'formal|cifar100|1', counter: 0, input_sha256: 89c9be567f9d68ce5413415df806eef64e5fd96ecf88a13d8a4c656f4b39a411, value: 2141022414}
+        - {label: 'formal|cifar100|2', counter: 0, input_sha256: 101ddb738f0e8c9fc516fd0536ae85a38717764c5128e82dc1727e98c72425fc, value: 252611743}
+        - {label: 'formal|cifar100|3', counter: 0, input_sha256: 7a2db1eac46c83669adae26b688f56f6b39a4448b379af7296433ac341f589ea, value: 1147962214}
+        - {label: 'formal|cifar100|4', counter: 0, input_sha256: 4227bd05b7803b884de156d59e4dae5e934499caa44acf6dbe6642015ac3290b, value: 931150728}
+        - {label: 'formal|cifar100|5', counter: 0, input_sha256: efb9375ffd8ef68824fa4022b5480c23db9dc90506c1c96911687a33db6d3e89, value: 2106521224}
+      bootstrap:
+        label: bootstrap|cifar100|1
+        counter: 0
+        input_sha256: 8ff56e58b55455f34f25d0e9e1e673eaee01d1262b7c566e68e97b6a6930af9c
+        value: 894719475
+    cifar10dvs:
+      health:
+        label: health|cifar10dvs|1
+        counter: 0
+        input_sha256: 07beb66bcc4bb09507e0523c6c05a67faf9f7c07daf329babe1b79dfd0b17dcd
+        value: 1280028821
+      pilot:
+        label: pilot|cifar10dvs|1
+        counter: 0
+        input_sha256: 01844870e6a374bdadc64ca3b1066c3eddc947be2a9892d4d3d46c78e28eb40f
+        value: 1721988285
+      formal:
+        - {label: 'formal|cifar10dvs|1', counter: 0, input_sha256: 9eac28c20967ea4501121588222b1532de8102514b06e2e36877265aaa6bbd00, value: 157805125}
+        - {label: 'formal|cifar10dvs|2', counter: 0, input_sha256: a925354bff0bc215aa6b50c21574f11bdcb1ab96e94f569736c7ba854d1e1fd5, value: 2131477013}
+        - {label: 'formal|cifar10dvs|3', counter: 0, input_sha256: d69a04f14e28e89bf2ccd899031e1e7a3658df8044e8f7c139c37f00524debf2, value: 1311303835}
+        - {label: 'formal|cifar10dvs|4', counter: 0, input_sha256: ff7040b298e2d87f1c71ce3c8b54591acde1ffa586283ee4ad452dde4a2be344, value: 417519743}
+        - {label: 'formal|cifar10dvs|5', counter: 0, input_sha256: 81c935a57c5af4f7f4fe7d72f8f476314bff4ce515c6451766acca1921db719e, value: 2086335735}
+      bootstrap:
+        label: bootstrap|cifar10dvs|1
+        counter: 0
+        input_sha256: 1331567f897e890a6fea9cccbb1af0e12a77e8cf5e3a8f42a093427f9652d9c4
+        value: 159287562
+
+pilot_acceptance:
+  identity: v5_talif_only_c1_c2_e120_deterministic_health
+  artifact_class: non_reportable_pilot
+  conditions: [C1, C2]
+  development_probe:
+    artifact_class: DEVELOPMENT_ONLY_V5_HEALTH_DESIGN_PROBE_RESULT
+    reporting_eligibility: FORBIDDEN_FROM_MANUSCRIPT_RESULTS
+    confirmatory_analysis_eligibility: false
+    expected_status: COMPLETED
+    expected_git_commit: 609a505445d68e9961778999b5f7a4bc79cc83a8
+    expected_tracked_clean: true
+    plan: configs/v5_health_calibration.yaml
+    plan_file_sha256: c5245b512d39e64672e83202ca6057cd1da38cc4a2578b6ca6db3db2b2d774d0
+    plan_hash: 25dd909f58ddf7408d688c0f102e058191e73612564c07b674bc516147ea4c93
+    development_entrypoint_sha256: 0d453bad2c3293f401150135267d27e947847dc9f83686023e1c30ffdc019f52
+    training_source_sha256: 5d5628679c8e3dcbf7d34ed180506b018853885a346807e96262205b14a0dfdf
+    v4_termination_record_sha256: af80181ca4b9858bfd680331aded8e14517faefc4a12128d46b07bca1d4c355a
+    v4_attempt_receipt_sha256: 8115975674e4e1952f0573f691de887dee142018067c7388bd466220125ab6fb
+    v4_failure_report_sha256: 547ea7b24da9976359605eb67467f89a100b482f3c2728fb2d760564d7f2a4b1
+    datasets:
+      cifar100:
+        path: results/development/v5_health_design_probe/cifar100_attempt01.json
+        sha256: 421dd0f1f08a7cac631df23d23815632acdb58eac6d654a2c8cd52383aab5eaa
+        fixed_batch_seed: 1515323759
+        formal_schedule_seed: 214400889
+      cifar10dvs:
+        path: results/development/v5_health_design_probe/cifar10dvs_attempt01.json
+        sha256: b3837bfb98948edb180f133a8f5f23bc2ab6e1d764c71dd81a4f987057afefd5
+        fixed_batch_seed: 117569744
+        formal_schedule_seed: 563701053
+  datasets:
+    cifar100:
+      health_seed: 897211180
+      pilot_seed: 1968690143
+      health_output: results/pilot/v5_talif_only/health_cifar100_s897211180.json
+      attempt_receipt: results/pilot/v5_talif_only/health_cifar100_s897211180.attempt.json
+      pilot_output_root: results/pilot/v5_talif_only/cifar100_s1968690143
+      pilot_plan: environment/v5_talif_only_pilot_cifar100_s1968690143.json
+    cifar10dvs:
+      health_seed: 1280028821
+      pilot_seed: 1721988285
+      health_output: results/pilot/v5_talif_only/health_cifar10dvs_s1280028821.json
+      attempt_receipt: results/pilot/v5_talif_only/health_cifar10dvs_s1280028821.attempt.json
+      pilot_output_root: results/pilot/v5_talif_only/cifar10dvs_s1721988285
+      pilot_plan: environment/v5_talif_only_pilot_cifar10dvs_s1721988285.json
+  validation_output: results/pilot/v5_talif_only/validation.json
+  environment:
+    expected_gpu_substring: RTX 5090
+    pytorch_version: 2.9.1+cu128
+    cuda_runtime: '12.8'
+    precision: float32
+    deterministic: true
+  implementation_health:
+    decision_basis: deterministic_mechanism_and_numerical_integrity_only
+    thresholds_evaluated: []
+    learning_metrics_role: descriptive_only_no_pass_fail_threshold
+    failed_or_interrupted_fresh_retry: forbidden_new_protocol_and_unused_seed_required
+    fixed_batch:
+      batch_size: 8
+      observation_steps: [0, 80]
+      optimizer_regime: base_lr_without_warmup_scheduler_steps
+      c2_ta_state: enabled_for_gradient_and_route_probe
+      minimum_ta_routed_gradient_coverage_observation: 0.0
+    formal_schedule:
+      epochs: 6
+      train_batches_per_epoch: 16
+      validation_batches_per_epoch: 4
+      required_activation_epoch_zero_based: 5
+      required_pre_activation_epochs: [0, 1, 2, 3, 4]
+      required_post_activation_epochs: [5]
+    checkpoint_resume:
+      required: true
+      checkpoint_name: last.pt
+      resume_loader: talif_msresnet.train._load_resume
+      boundary: epoch_4_checkpoint_to_epoch_5_ta_activation_zero_based
+  timing:
+    maximum_ta_enabled_over_frozen_ratio: 3.0
+    epoch_time_ratio_conditions: [C2]
+    ta_state_source: events_jsonl_epoch_completed_ta_enabled
+  schedule:
+    epochs: 120
+    required_best_validation_accuracy:
+      cifar100: 0.30
+      cifar10dvs: 0.50
+    late_window_epochs: 10
+    minimum_late_mean_accuracy:
+      cifar100: 0.25
+      cifar10dvs: 0.45
+    minimum_late_to_best_ratio: 0.80
+    minimum_post_warmup_residual_gradient_coverage: 0.95
+    require_all_conditions_converged: true
+    technical_interruption_policy: same_environment_last_checkpoint_resume_permitted
+    cross_environment_resume: forbidden
+    failed_or_interrupted_fresh_retry: forbidden
+    failure_action: new_protocol_version_and_new_unused_seed
+
+data:
+  root: data
+  val_fraction: 0.1
+  split_seed: 2024
+  split_manifest: data/manifests/{dataset}_seed{split_seed}.json
+  normalize: true
+  augment: true
+  autoaugment: false
+  download: true
+  num_workers: 0
+  pin_memory: true
+
+datasets:
+  cifar10:
+    dataset: cifar10
+    root: data/cifar10
+    num_classes: 10
+    in_channels: 3
+  cifar100:
+    dataset: cifar100
+    root: data/cifar100
+    num_classes: 100
+    in_channels: 3
+  cifar10dvs:
+    dataset: cifar10dvs
+    root: data/cifar10dvs
+    normalize: false
+    frames_path: data/cifar10dvs/processed
+    test_frames_path: data/cifar10dvs/processed
+    num_classes: 10
+    in_channels: 2
+    dvs_time_bins: 10
+    dvs_height: 48
+    dvs_width: 48
+    dvs_resize_mode: nearest
+    dvs_test_fraction: 0.2
+    dvs_split_seed: 2024
+    val_fraction: 0.125
+
+# C3/C4 remain defined for historical parser compatibility but are inactive and
+# forbidden in every v5 matrix.
+conditions:
+  C1:
+    topology: spiking_resnet
+    neuron: lif
+  C2:
+    topology: spiking_resnet
+    neuron: ta_lif
+  C3:
+    topology: ms_resnet
+    neuron: lif
+  C4:
+    topology: ms_resnet
+    neuron: ta_lif
+
+model:
+  base_channels: 16
+  terminal_neuron_mode: topology_required
+  neuron_cfg:
+    tau: 0.5
+    threshold: 1.0
+    v_rest: 0.0
+    v_reset: 0.0
+    width: 1.0
+    delta_min: 0.05
+
+optimizer:
+  epochs: 120
+  batch_size: 64
+  lr: 0.025
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [75, 90, 105]
+  gamma: 0.1
+  ta_start_fraction: 0.041666666666666664
+  ta_lr_scale: 0.1
+  ta_weight_decay: 0.0
+  grad_clip: 1.0
+  warmup_epochs: 5
+  exclude_norm_and_bias_from_weight_decay: true
+  label_smoothing: 0.0
+  cutmix_alpha: 0.0
+  cutmix_probability: 0.0
+
+runtime:
+  device: auto
+  checkpoint_every: 1
+  log_every: 100
+  amp: false
+  deterministic: true
+  dry_run: false
+  limit_batches: null
+  resume: null
+
+experiments:
+  E1: paired TA-LIF versus LIF accuracy evaluation
+  E2: paired-seed statistical analysis of E1 outputs
+  E3: descriptive diagnostics from frozen E1 checkpoints
+
+analysis:
+  collect_activity: false
+  accuracy_scale: proportion
+  validation_accuracy_thresholds:
+    cifar100: 0.60
+    cifar10dvs: 0.60
+  convergence_epoch_rule: first_validation_epoch_at_or_above_threshold
+  nonconvergence_rule: not_reached_by_final_epoch_no_exclusion
+  failure_rule: nonfinite_loss_missing_best_checkpoint_or_unsuccessful_process_blocks_complete_pair
+  alpha: 0.05
+  confidence_level: 0.95
+  primary_dataset: cifar100
+  replication_dataset: cifar10dvs
+  primary_accuracy_test:
+    estimand: mean_seed_paired_c2_minus_c1_test_accuracy_pp
+    blocking_factor: seed
+    test_statistic: one_sample_t_over_seed_level_differences
+    null_hypothesis: mean_delta_le_0
+    alternative_hypothesis: mean_delta_gt_0
+    sidedness: one_sided_greater
+    estimation_interval: two_sided_95_percent_t
+    degrees_of_freedom: 4
+    decision_rule: p_lt_0_05_and_mean_delta_gt_0
+    normality_pretest_switch: forbidden
+    zero_variance_rule: not_estimable_primary_inconclusive
+  replication_analysis:
+    method: same_paired_t_estimate_interval_and_raw_differences
+    role: prespecified_replication_external_validity_not_confirmatory
+    cross_dataset_multiplicity: none_single_confirmatory_primary
+    cannot_rescue_primary: true
+  sign_flip:
+    assignments: 32
+    enumeration: all_2_power_5_seed_level_sign_flips
+    sidedness: one_sided_greater
+    role: sensitivity_only_cannot_rescue_primary
+  bootstrap:
+    resamples: 10000
+    resampling_unit: complete_seed_pair
+    cellwise_resampling: forbidden
+    rng: numpy_generator_pcg64
+    index_draw: integers_0_5_size_10000_by_5_endpoint_false
+    statistic: mean_seed_paired_c2_minus_c1_test_accuracy_pp
+    interval: two_sided_95_percent_percentile
+    quantile_method: linear
+    seeds:
+      cifar100: 894719475
+      cifar10dvs: 159287562
+    role: sensitivity_only_cannot_rescue_primary
+  model_selection:
+    checkpoint: best.pt
+    primary_order: maximum_validation_accuracy
+    first_tie_breaker: minimum_validation_loss
+    exact_tie_breaker: earliest_epoch
+    test_based_selection: forbidden
+  test_access:
+    training_config_final_test: false
+    when: after_all_20_runs_and_best_checkpoints_pass_frozen_audit
+    access_count_per_checkpoint: 1
+    reselection_or_repeated_evaluation: forbidden
+    ambiguous_interruption: stop_document_and_obtain_author_decision
+  run_handling:
+    pilot_in_reportable_analysis: forbidden
+    failed_run_records: retain
+    seed_substitution: forbidden
+    outlier_exclusion: forbidden
+    nonconvergence_excludes_run: false
+    incomplete_seed_pair: unresolved_no_partial_analysis
+    cross_environment_checkpoint_resume: forbidden
+    protocol_change_after_first_reportable_run: forbidden
+  wording_gates:
+    cifar100_improved: primary_p_lt_0_05_and_mean_delta_gt_0
+    primary_not_passed: inconclusive_no_equivalence_or_no_effect_claim
+    dvs_cannot_rescue_primary: true
+    dvs_directional_support: mean_delta_gt_0
+    dvs_replication_claim: one_sided_p_lt_0_05_and_mean_delta_gt_0
+    cross_domain_improvement: both_dataset_tests_pass_and_both_means_gt_0
+  efficiency:
+    role: descriptive_only
+    contrast: C2_over_C1_paired_within_seed
+    metrics: [training_time, cuda_latency, peak_memory]
+    confidence_interval: paired_two_sided_95_percent_t_on_log_ratio
+    homogeneous_environment_required: true
+    energy: not_assessed
+
+benchmark:
+  device_type: cuda
+  precision: float32
+  batch_sizes: [1, 128]
+  warmup_iterations: 25
+  timed_iterations: 100
+  timing_method: synchronized_cuda_events
+  input_residency: preloaded_on_device_before_warmup_and_timing
+  energy_model:
+    status: not_assessed
+    constants_path: null
+    constants_sha256: none
+    source: none
+
+matrix:
+  primary:
+    - experiment: E1
+      dataset: cifar100
+      depth: 20
+      time_steps: 6
+      seeds: [2141022414, 252611743, 1147962214, 931150728, 2106521224]
+    - experiment: E1
+      dataset: cifar10dvs
+      depth: 20
+      time_steps: 10
+      seeds: [157805125, 2131477013, 1311303835, 417519743, 2086335735]
