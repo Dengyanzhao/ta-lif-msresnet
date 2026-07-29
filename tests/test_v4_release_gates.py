@@ -13,6 +13,7 @@ import pytest
 
 import talif_msresnet.freeze as freeze_module
 import talif_msresnet.preflight as preflight_module
+from talif_msresnet.config import load_run_config
 from talif_msresnet.freeze import FreezeGateError
 
 
@@ -31,6 +32,24 @@ def _load_freeze_tool():
 
 
 tool = _load_freeze_tool()
+
+
+@pytest.mark.parametrize(
+    ("matrix_name", "expected_count"),
+    (
+        ("v4_talif_only_pilot_generated", 4),
+        ("v4_talif_only_generated", 20),
+    ),
+)
+def test_tracked_v4_matrix_yamls_are_directly_loadable(
+    matrix_name: str, expected_count: int
+) -> None:
+    paths = sorted((ROOT / "configs" / matrix_name).glob("*.yaml"))
+
+    assert len(paths) == expected_count
+    for path in paths:
+        config = load_run_config(path, V4_PROTOCOL_PATH)
+        assert config.runtime.run_id == path.stem
 
 
 @pytest.mark.parametrize(

@@ -280,6 +280,20 @@ def test_v4_protocol_is_executable_but_direct_run_still_requires_gate_evidence()
         train_module.run(config)
 
 
+def test_v4_resolved_configs_round_trip_through_the_written_yaml_shape() -> None:
+    protocol = load_protocol(ROOT / "configs" / "protocol_v4_talif_only.yaml")
+    raw_runs = generate_run_matrix(protocol) + generate_v4_pilot_matrix(protocol)
+
+    for raw in raw_runs:
+        resolved = validate_run_mapping(raw, protocol)
+        serialized = resolved.as_dict()
+
+        assert "run_id" not in serialized
+        reloaded = validate_run_mapping(serialized, protocol)
+        assert reloaded.as_dict() == serialized
+        assert reloaded.runtime.run_id == resolved.runtime.run_id
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

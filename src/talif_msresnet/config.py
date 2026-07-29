@@ -1926,7 +1926,7 @@ def validate_run_mapping(raw: Mapping[str, Any], protocol: Mapping[str, Any] | N
         _validate_v4_run_contract(
             protocol=protocol,
             experiment=experiment,
-            run_id=run_id,
+            run_id=runtime_cfg.run_id,
             data=data,
             model=model,
             optimizer=optimizer,
