@@ -16,6 +16,12 @@ the command fails or is interrupted.
 - Target environment: RTX 5090, PyTorch `2.9.1+cu128`, CUDA runtime `12.8`,
   deterministic float32, AMP disabled
 
+Use the same activated virtual environment and the same RTX 5090 runtime for
+both dataset health/pilot blocks, formal freeze, all formal runs, and final-test
+evaluation. The two pilot blocks and every later stage must share one identical
+`training_environment_sha256`; any mismatch blocks release. This is the hard
+execution rule for `analysis.efficiency.homogeneous_environment_required: true`.
+
 One-shot health/pilot seeds:
 
 - CIFAR-100: `1975342236`
@@ -70,7 +76,7 @@ The next command claims seed `1975342236` before compute. Run it once only.
   --protocol "$PROTOCOL" --dataset cifar100 --device cuda:0
 ```
 
-Continue only if it prints `V4_HEALTH_PASS dataset=cifar100`. Then launch the
+Continue only if it prints `V4_HEALTH_GATE_PASS dataset=cifar100`. Then launch the
 complete ordered C1/C2 block:
 
 ```bash
@@ -91,7 +97,7 @@ The next command claims seed `1983855948` before compute. Run it once only.
   --protocol "$PROTOCOL" --dataset cifar10dvs --device cuda:0
 ```
 
-Continue only if it prints `V4_HEALTH_PASS dataset=cifar10dvs`. Then run:
+Continue only if it prints `V4_HEALTH_GATE_PASS dataset=cifar10dvs`. Then run:
 
 ```bash
 "$PYTHON" scripts/run_matrix.py \

@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _health_verdict(status: str, dataset: str) -> str:
+    return f"V4_HEALTH_GATE_{status} dataset={dataset}"
+
+
 def _repository_path(value: str | Path) -> Path:
     path = Path(value).expanduser()
     return (path if path.is_absolute() else REPOSITORY_ROOT / path).resolve()
@@ -572,7 +576,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("V4_HEALTH_GATE_BLOCKED: output appeared during execution", file=sys.stderr)
         return 2
     atomic_write_json(block.health_output, report)
-    print(f"V4_HEALTH_GATE_{report['status']}")
+    print(_health_verdict(str(report["status"]), block.dataset))
     print(f"NON_REPORTING_OUTPUT={block.health_output}")
     print(f"SEED_{block.seed}_CONSUMED_DO_NOT_RETRY")
     return 0 if report["pass"] else 1

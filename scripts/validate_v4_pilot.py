@@ -419,6 +419,32 @@ def _validate_run(
     return base_report, environment_hash, shared_hash, split_hash
 
 
+def _cross_dataset_environment_gate(
+    datasets_report: Mapping[str, Mapping[str, Any]],
+) -> tuple[str | None, list[str]]:
+    """Require one valid training environment identity for both dataset blocks."""
+
+    observed = {
+        dataset: (
+            datasets_report[dataset].get("environment_sha256")
+            if isinstance(datasets_report.get(dataset), Mapping)
+            else None
+        )
+        for dataset in V4_PILOT_DATASETS
+    }
+    valid_hashes = [
+        value
+        for value in observed.values()
+        if isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    ]
+    if len(valid_hashes) == len(V4_PILOT_DATASETS) and len(set(valid_hashes)) == 1:
+        return valid_hashes[0], []
+    detail = ", ".join(f"{dataset}={observed[dataset]!r}" for dataset in V4_PILOT_DATASETS)
+    return None, ["training environment hashes are not identical across dataset blocks: " + detail]
+
+
 def validate_pilot(
     *,
     protocol_path: str | Path,
@@ -591,6 +617,11 @@ def validate_pilot(
         aggregate_integrity.extend(f"{dataset}: {failure}" for failure in block_integrity)
         aggregate_thresholds.extend(f"{dataset}: {failure}" for failure in block_thresholds)
 
+    training_environment_sha256, cross_dataset_environment_failures = (
+        _cross_dataset_environment_gate(datasets_report)
+    )
+    aggregate_integrity.extend(cross_dataset_environment_failures)
+
     if aggregate_integrity:
         status, decision, exit_code = "INVALID", INVALID_DECISION, 2
     elif aggregate_thresholds:
@@ -626,8 +657,10 @@ def validate_pilot(
                 "minimum_post_warmup_residual_gradient_coverage"
             ],
         },
-        "dataset_blocks_independent": True,
-        "cross_dataset_environment_split_or_shared_hash_equality_required": False,
+        "dataset_acceptance_thresholds_independent": True,
+        "cross_dataset_training_environment_hash_equality_required": True,
+        "cross_dataset_shared_weight_or_split_manifest_hash_equality_required": False,
+        "training_environment_sha256": training_environment_sha256,
         "failure_action": schedule["failure_action"],
         "fallback": None,
         "datasets": datasets_report,
