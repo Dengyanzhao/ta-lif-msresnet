@@ -57,6 +57,9 @@ class TinyDiagnosticModel(nn.Module):
                         "spike_rate": 0.25,
                         "spike_count": 8.0,
                         "elements": 32,
+                        "surrogate_coverage": 0.75,
+                        "surrogate_active": 24.0,
+                        "surrogate_elements": 32,
                         "window_v1": [0.5, 0.6],
                         "window_v2": [1.0, 1.1],
                     }
@@ -104,6 +107,9 @@ def test_activity_expands_windows_membrane_and_count_occupancy() -> None:
     assert layer["membrane_status"] == "measured_final_time_state"
     assert layer["count_occupancy_status"] == "measured_final_time_state"
     assert json.loads(layer["count_occupancy_json"]) == pytest.approx([1.0])
+    assert layer["surrogate_coverage"] == pytest.approx(0.75)
+    assert layer["surrogate_active"] == pytest.approx(24.0)
+    assert layer["surrogate_elements"] == 32
 
 
 def test_representative_batch_hash_covers_targets() -> None:

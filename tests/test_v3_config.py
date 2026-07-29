@@ -66,11 +66,14 @@ def test_v3_protocol_is_signed_and_isolated(protocol) -> None:
     assert "PENDING" not in signoff
 
 
-def test_v3_active_documents_match_the_signed_phase_a_state() -> None:
+def test_active_documents_match_v3_failure_and_gated_v4_authorization() -> None:
     documents = {
         "readme": ROOT / "README.md",
         "runbook": ROOT / "V3_TALIF_ONLY_RUNBOOK.md",
         "design": ROOT / "V3_TALIF_ONLY_PROTOCOL_DRAFT.md",
+        "v4_draft": ROOT / "V4_TALIF_ONLY_PROTOCOL_DRAFT.md",
+        "v4_runbook": ROOT / "V4_TALIF_ONLY_RUNBOOK.md",
+        "v4_signoff": ROOT / "PREREGISTRATION_SIGNOFF_V4_TALIF_ONLY.md",
         "closure": ROOT / "MS_RESNET_ROUTE_CLOSURE.md",
         "signoff": ROOT / V3_ARTIFACT_PATHS["signoff"],
     }
@@ -79,9 +82,23 @@ def test_v3_active_documents_match_the_signed_phase_a_state() -> None:
         for name, path in documents.items()
     }
 
-    assert "signed and phase a-frozen" in normalized["readme"]
+    assert "v3 cifar-100 pilot failed" in normalized["readme"]
+    assert "protocol v4 is now frozen" in normalized["readme"]
+    assert "formal v4 remains" in normalized["readme"]
+    assert "blocked until both dataset pilots" in normalized["readme"]
+    assert "v3 pilot failed" in normalized["runbook"]
+    assert "formal permanently" in normalized["runbook"]
+    assert "blocked" in normalized["runbook"]
     assert "phase a: author/source freeze (completed)" in normalized["runbook"]
     assert "author-approved and phase a-frozen" in normalized["design"]
+    assert "verification status: unverified" in normalized["v4_draft"]
+    assert (
+        "draft - author confirmation required; execution not authorized"
+        in normalized["v4_draft"]
+    )
+    assert "this is the only authorized execution order" in normalized["v4_runbook"]
+    assert "formal training is authorized only" in normalized["v4_runbook"]
+    assert "accountable author/user approval recorded" in normalized["v4_signoff"]
     assert "signed and phase a-frozen" in normalized["closure"]
     assert "phase b's isolated matrix generation, health gates" in normalized["signoff"]
 

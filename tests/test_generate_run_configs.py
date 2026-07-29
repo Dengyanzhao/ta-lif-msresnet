@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ pytest.importorskip("torch")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import generate_run_configs as generator  # noqa: E402
 from generate_run_configs import generate  # noqa: E402
 
 
@@ -77,3 +79,37 @@ def test_v2r2_generation_is_one_isolated_seed88_block(tmp_path: Path) -> None:
 
     generate(protocol_path, output)
     assert csv_path.read_bytes() == csv_bytes
+
+
+def test_v4_generation_publishes_exact_isolated_formal_and_pilot_matrices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    configs = project / "configs"
+    configs.mkdir(parents=True)
+    protocol_path = configs / "protocol_v4_talif_only.yaml"
+    shutil.copyfile(ROOT / "configs" / protocol_path.name, protocol_path)
+    monkeypatch.setattr(generator, "PROJECT_ROOT", project)
+
+    formal_dir = configs / "v4_talif_only_generated"
+    pilot_dir = configs / "v4_talif_only_pilot_generated"
+    formal = generator.generate(protocol_path, formal_dir, stage="formal")
+    pilot = generator.generate(protocol_path, pilot_dir, stage="pilot")
+
+    assert len(formal) == 20
+    assert len(pilot) == 4
+    assert len(list(formal_dir.glob("*.yaml"))) == 20
+    assert len(list(pilot_dir.glob("*.yaml"))) == 4
+    formal_manifest = json.loads(
+        (formal_dir / "matrix_manifest.json").read_text(encoding="utf-8")
+    )
+    pilot_manifest = json.loads(
+        (pilot_dir / "matrix_manifest.json").read_text(encoding="utf-8")
+    )
+    assert formal_manifest["run_count"] == 20
+    assert pilot_manifest["run_count"] == 4
+    assert formal_manifest["protocol"] == "configs/protocol_v4_talif_only.yaml"
+    assert pilot_manifest["seeds"] == [1975342236, 1983855948]
+
+    with pytest.raises(ValueError, match="isolated matrix path"):
+        generator.generate(protocol_path, tmp_path / "wrong", stage="formal")

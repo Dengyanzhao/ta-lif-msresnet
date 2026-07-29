@@ -1,0 +1,80 @@
+{
+  "conditions": [
+    "C1",
+    "C2"
+  ],
+  "matrix_hash": "dcb98a99e5f04ae0dc7abf11e526b46c6cf2b8a3634dac9e9ac0ce5979c3ab86",
+  "protocol": "configs/protocol_v4_talif_only.yaml",
+  "protocol_hash": "68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54",
+  "run_count": 4,
+  "runs": [
+    {
+      "condition": "C1",
+      "config_file": "E1_cifar100_d20_t6_C1_s1975342236.yaml",
+      "config_file_sha256": "7b6fd7e24178284eb5916f863e76514cde9a3c9817b6c436e583026ebb93fd04",
+      "config_hash": "f7a3920b6b8ee41a97e71b8c13ce69086865358aab4782f8c24393f53c6f9582",
+      "dataset": "cifar100",
+      "depth": 20,
+      "experiment": "E1",
+      "matrix_key": "[\"cifar100\",20,6,\"C1\",1975342236]",
+      "neuron": "lif",
+      "protocol_hash": "68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54",
+      "run_id": "E1_cifar100_d20_t6_C1_s1975342236",
+      "seed": 1975342236,
+      "time_steps": 6,
+      "topology": "spiking_resnet"
+    },
+    {
+      "condition": "C2",
+      "config_file": "E1_cifar100_d20_t6_C2_s1975342236.yaml",
+      "config_file_sha256": "a355b53c224c08d9a6b862e1bef6b00d6ea24e005ee286dc575eaf2c38b544fc",
+      "config_hash": "cdca1cf4d77728f609f3ca54c1e3581c475a4ae55ed1587e2d6495f6b6d69f00",
+      "dataset": "cifar100",
+      "depth": 20,
+      "experiment": "E1",
+      "matrix_key": "[\"cifar100\",20,6,\"C2\",1975342236]",
+      "neuron": "ta_lif",
+      "protocol_hash": "68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54",
+      "run_id": "E1_cifar100_d20_t6_C2_s1975342236",
+      "seed": 1975342236,
+      "time_steps": 6,
+      "topology": "spiking_resnet"
+    },
+    {
+      "condition": "C1",
+      "config_file": "E1_cifar10dvs_d20_t10_C1_s1983855948.yaml",
+      "config_file_sha256": "1a7ffc3bb1452edd5e676193dc4b579b3c0dccf5db76f984d653005600777227",
+      "config_hash": "c6ea51f614737c7533ed6cdf06aed95d75e5790a42a85f84e92ca9ba738a214e",
+      "dataset": "cifar10dvs",
+      "depth": 20,
+      "experiment": "E1",
+      "matrix_key": "[\"cifar10dvs\",20,10,\"C1\",1983855948]",
+      "neuron": "lif",
+      "protocol_hash": "68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54",
+      "run_id": "E1_cifar10dvs_d20_t10_C1_s1983855948",
+      "seed": 1983855948,
+      "time_steps": 10,
+      "topology": "spiking_resnet"
+    },
+    {
+      "condition": "C2",
+      "config_file": "E1_cifar10dvs_d20_t10_C2_s1983855948.yaml",
+      "config_file_sha256": "6118fad81458fefb8e4d101ae2fc59fb798cca6b691022fa0c2e74cd9b42b29e",
+      "config_hash": "c39e4bf071ab18a141342831b2788f71954a1e8b2e9706a40a71ae6eed4907d0",
+      "dataset": "cifar10dvs",
+      "depth": 20,
+      "experiment": "E1",
+      "matrix_key": "[\"cifar10dvs\",20,10,\"C2\",1983855948]",
+      "neuron": "ta_lif",
+      "protocol_hash": "68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54",
+      "run_id": "E1_cifar10dvs_d20_t10_C2_s1983855948",
+      "seed": 1983855948,
+      "time_steps": 10,
+      "topology": "spiking_resnet"
+    }
+  ],
+  "seeds": [
+    1975342236,
+    1983855948
+  ]
+}

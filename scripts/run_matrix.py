@@ -22,6 +22,7 @@ from talif_msresnet.config import (  # noqa: E402
     artifact_paths_for_protocol,
     generate_run_matrix,
     generate_v3_pilot_matrix,
+    generate_v4_pilot_matrix,
     load_protocol,
     load_run_config,
     validate_run_mapping,
@@ -34,6 +35,15 @@ from talif_msresnet.pilot_v3 import (  # noqa: E402
     require_v3_author_freeze,
     resolve_pilot_block,
     validate_health_report as validate_v3_health_report,
+)
+from talif_msresnet.pilot_v4 import (  # noqa: E402
+    PilotBlock as PilotV4Block,
+    PilotV4Error,
+    expected_pilot_configs as expected_v4_pilot_configs,
+    expected_pilot_plan_payload as expected_v4_pilot_plan_payload,
+    require_v4_author_freeze,
+    resolve_pilot_block as resolve_v4_pilot_block,
+    validate_health_report as validate_v4_health_report,
 )
 from talif_msresnet.freeze import FreezeGateError, verify_formal_freeze  # noqa: E402
 from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
@@ -51,6 +61,9 @@ from pilot_health_gate import (  # noqa: E402
 )
 from pilot_health_gate_v3 import (  # noqa: E402
     validate_current_runtime_against_health_report as validate_v3_current_runtime,
+)
+from pilot_health_gate_v4 import (  # noqa: E402
+    validate_current_runtime_against_health_report as validate_v4_current_runtime,
 )
 
 PILOT_PLAN_VERSION = 1
@@ -125,6 +138,13 @@ def _is_v2_pilot(protocol: Mapping[str, Any]) -> bool:
 def _is_v3_pilot(protocol: Mapping[str, Any]) -> bool:
     return (
         protocol.get("protocol_version") == 3
+        and protocol.get("study_stage") == "pilot_and_formal"
+    )
+
+
+def _is_v4_pilot(protocol: Mapping[str, Any]) -> bool:
+    return (
+        protocol.get("protocol_version") == 4
         and protocol.get("study_stage") == "pilot_and_formal"
     )
 
@@ -219,6 +239,52 @@ def _validate_v3_pilot_launch_contract(
     return block, block.pilot_output_root, block.pilot_plan, report
 
 
+def _validate_v4_pilot_launch_contract(
+    *,
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    selected_rows: Sequence[dict[str, str]],
+    dataset: str | None,
+    output_root: str | Path | None,
+    pilot_plan: str | Path | None,
+) -> tuple[PilotV4Block, Path, Path, dict[str, Any]]:
+    """Bind one exact v4 dataset C1/C2 block to its one-shot health PASS."""
+
+    if dataset is None:
+        raise ValueError("Protocol v4 pilot execution requires --dataset")
+    try:
+        block = resolve_v4_pilot_block(
+            protocol, dataset, repository_root=PROJECT_ROOT
+        )
+    except PilotV4Error as exc:
+        raise ValueError(f"Invalid v4 pilot block: {exc}") from exc
+    if len(selected_rows) != 2:
+        raise ValueError("The v4 pilot must launch exactly one complete C1/C2 block")
+    conditions = [str(row.get("condition")) for row in selected_rows]
+    if conditions != list(block.conditions):
+        raise ValueError("The v4 pilot launch order must be exactly C1, C2")
+    if len({_pilot_block(row) for row in selected_rows}) != 1:
+        raise ValueError("The v4 pilot rows must belong to one dataset/depth/T/seed block")
+    selected_block = _pilot_block(selected_rows[0])
+    if selected_block[1] != block.dataset or selected_block[4] != block.seed:
+        raise ValueError("The selected v4 pilot block differs from the protocol binding")
+    if output_root is not None and _project_path(output_root) != block.pilot_output_root:
+        raise ValueError("--output-root cannot override the v4 dataset pilot output root")
+    if pilot_plan is not None and _project_path(pilot_plan) != block.pilot_plan:
+        raise ValueError("--pilot-plan cannot override the v4 dataset pilot plan")
+    try:
+        report = validate_v4_health_report(
+            block.health_output,
+            protocol_path,
+            block.dataset,
+            repository_root=PROJECT_ROOT,
+            require_current_tracked_clean=True,
+        )
+    except PilotV4Error as exc:
+        raise RuntimeError(f"V4 pilot health-report gate blocked execution: {exc}") from exc
+    return block, block.pilot_output_root, block.pilot_plan, report
+
+
 def _prepare_v3_pilot_plan(
     *,
     block: PilotBlock,
@@ -241,6 +307,35 @@ def _prepare_v3_pilot_plan(
             if existing != expected:
                 raise ValueError(
                     "A different v3 dataset pilot plan already exists; preserve it and "
+                    "create a new protocol generation rather than overwriting it"
+                )
+        else:
+            atomic_write_json(block.pilot_plan, expected)
+    return block.pilot_plan.resolve()
+
+
+def _prepare_v4_pilot_plan(
+    *,
+    block: PilotV4Block,
+    protocol_path: Path,
+    config_dir: Path,
+    manifest_rows: Sequence[dict[str, str]],
+    health_report: Mapping[str, Any],
+) -> Path:
+    expected = expected_v4_pilot_plan_payload(
+        block=block,
+        protocol_path=protocol_path,
+        config_dir=config_dir,
+        manifest_rows=manifest_rows,
+        health_report=health_report,
+        repository_root=PROJECT_ROOT,
+    )
+    with file_lock(block.pilot_plan):
+        if block.pilot_plan.exists():
+            existing = json.loads(block.pilot_plan.read_text(encoding="utf-8"))
+            if existing != expected:
+                raise ValueError(
+                    "A different v4 dataset pilot plan already exists; preserve it and "
                     "create a new protocol generation rather than overwriting it"
                 )
         else:
@@ -491,8 +586,8 @@ def _continuation_action(
         )
     if forbid_fresh_after_attempt and old_logs:
         raise RuntimeError(
-            f"{run_id} has an earlier attempt but no last.pt. Protocol v3 forbids a fresh "
-            "retry under the consumed run identity"
+            f"{run_id} has an earlier attempt but no last.pt. The frozen TA-LIF "
+            "protocol forbids a fresh retry under the consumed run identity"
         )
     return "fresh", None
 
@@ -517,15 +612,17 @@ def run_matrix(
     protocol_path = _project_path(protocol_path)
     protocol = load_protocol(protocol_path)
     protocol_version = int(protocol.get("protocol_version", 1))
-    if protocol_version == 3 and dry_run:
+    if protocol_version in (3, 4) and dry_run:
         raise ValueError(
-            "Protocol v3 matrix dry-runs are disabled; use generate_run_configs.py "
-            "--dry-run and reserve training commands for the author-frozen health/pilot gates"
+            f"Protocol v{protocol_version} matrix dry-runs are disabled; use "
+            "generate_run_configs.py --dry-run and reserve training commands for "
+            "the author-frozen health/pilot gates"
         )
     pilot_active = bool(allow_unfrozen_pilot)
     v3_pilot = bool(pilot_active and _is_v3_pilot(protocol))
+    v4_pilot = bool(pilot_active and _is_v4_pilot(protocol))
     if config_dir is None and config_path is None:
-        if protocol_version == 3:
+        if protocol_version in (3, 4):
             matrix_key = "pilot_matrix" if pilot_active else "formal_matrix"
             config_dir = PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_key]
         else:
@@ -557,7 +654,7 @@ def run_matrix(
     pilot_output_root: Path | None = None
     selected_pilot_plan: Path | None = (
         None
-        if v3_pilot
+        if v3_pilot or v4_pilot
         else _validated_pilot_plan_path(pilot_plan or PILOT_PLAN_PATH)
     )
     pilot_health_path: Path | None = None
@@ -565,12 +662,45 @@ def run_matrix(
     pilot_reference_config = None
     pilot_launch_context: dict[str, Any] | None = None
     v3_block: PilotBlock | None = None
+    v4_block: PilotV4Block | None = None
     if pilot_active:
         if config_path is not None:
             raise ValueError("Unfrozen pilots require --config-dir so the full plan is auditable")
         if dry_run:
             raise ValueError("--allow-unfrozen-pilot cannot be combined with --dry-run")
-        if v3_pilot:
+        if v4_pilot:
+            try:
+                require_v4_author_freeze(protocol, repository_root=PROJECT_ROOT)
+            except PilotV4Error as exc:
+                raise ValueError(f"Protocol v4 pilot requires author freeze: {exc}") from exc
+            if condition is not None or limit is not None or experiment is not None:
+                raise ValueError(
+                    "Protocol v4 pilot selection permits only --dataset; condition, limit, "
+                    "and experiment filters are forbidden"
+                )
+            assert config_dir is not None
+            expected_config_dir = _project_path(
+                artifact_paths_for_protocol(protocol)["pilot_matrix"]
+            )
+            if config_dir != expected_config_dir:
+                raise ValueError(
+                    "Protocol v4 pilot execution must use artifact_paths.pilot_matrix"
+                )
+            (
+                v4_block,
+                pilot_output_root,
+                selected_pilot_plan,
+                pilot_health_report,
+            ) = _validate_v4_pilot_launch_contract(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                selected_rows=rows,
+                dataset=dataset,
+                output_root=output_root,
+                pilot_plan=pilot_plan,
+            )
+            pilot_health_path = v4_block.health_output
+        elif v3_pilot:
             try:
                 require_v3_author_freeze(protocol, repository_root=PROJECT_ROOT)
             except PilotV3Error as exc:
@@ -637,23 +767,26 @@ def run_matrix(
         raise RuntimeError(f"Preflight blocked matrix execution:\n{details}")
     if not dry_run and not pilot_active:
         assert config_dir is not None
-        if protocol_version == 3:
+        if protocol_version in (3, 4):
             artifacts = artifact_paths_for_protocol(protocol)
             expected_config_dir = _project_path(artifacts["formal_matrix"])
             expected_output_root = _project_path(artifacts["formal_results"])
             if config_dir != expected_config_dir:
                 raise ValueError(
-                    "Protocol v3 formal execution must use artifact_paths.formal_matrix"
+                    f"Protocol v{protocol_version} formal execution must use "
+                    "artifact_paths.formal_matrix"
                 )
             if output_root is not None and _project_path(output_root) != expected_output_root:
                 raise ValueError(
-                    "Protocol v3 formal execution must use artifact_paths.formal_results"
+                    f"Protocol v{protocol_version} formal execution must use "
+                    "artifact_paths.formal_results"
                 )
             if config_path is not None or any(
                 value is not None for value in (limit, experiment, condition, dataset)
             ):
                 raise ValueError(
-                    "Protocol v3 formal execution requires the complete frozen 20-run matrix; "
+                    f"Protocol v{protocol_version} formal execution requires the complete "
+                    "frozen 20-run matrix; "
                     "partial selection is forbidden"
                 )
         try:
@@ -665,7 +798,7 @@ def run_matrix(
         except FreezeGateError as exc:
             raise RuntimeError(f"Formal freeze-manifest gate blocked execution: {exc}") from exc
     if pilot_active:
-        conditions_label = "C1/C2" if v3_pilot else "C1-C4"
+        conditions_label = "C1/C2" if v3_pilot or v4_pilot else "C1-C4"
         print(
             f"WARNING: running the fixed non-reportable {conditions_label} pilot plan; "
             "do not report these results"
@@ -705,15 +838,43 @@ def run_matrix(
                     f"V2 pilot current-runtime/data gate blocked execution: {exc}"
                 ) from exc
             print("V2_PILOT_CURRENT_CONTEXT_PASS")
-        elif protocol_version == 3 and not dry_run and not pilot_active:
+        elif protocol_version in (3, 4) and not dry_run and not pilot_active:
             _validate_v2_generated_matrix(
                 protocol=protocol,
                 protocol_path=protocol_path,
                 config_dir=config_dir,
                 manifest_rows=all_rows,
                 matrix_manifest=metadata,
-                label="V3 formal",
+                label=f"V{protocol_version} formal",
             )
+        elif v4_pilot:
+            assert v4_block is not None
+            assert pilot_health_report is not None
+            _validate_v2_generated_matrix(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                config_dir=config_dir,
+                manifest_rows=all_rows,
+                matrix_manifest=metadata,
+                expected_raw_runs=generate_v4_pilot_matrix(protocol),
+                label="V4 pilot",
+            )
+            pilot_reference_config = expected_v4_pilot_configs(
+                protocol, v4_block.dataset
+            )[0]
+            try:
+                pilot_launch_context = validate_v4_current_runtime(
+                    pilot_health_report,
+                    protocol=protocol,
+                    reference_config=pilot_reference_config,
+                    block=v4_block,
+                    device=str(device or ""),
+                )
+            except PilotV4Error as exc:
+                raise RuntimeError(
+                    f"V4 pilot current-runtime/data gate blocked execution: {exc}"
+                ) from exc
+            print(f"V4_PILOT_CURRENT_CONTEXT_PASS dataset={v4_block.dataset}")
         elif v3_pilot:
             assert v3_block is not None
             assert pilot_health_report is not None
@@ -751,7 +912,7 @@ def run_matrix(
         training_output_root = pilot_output_root
         result_root = training_output_root
     else:
-        if protocol_version == 3:
+        if protocol_version in (3, 4):
             training_output_root = _project_path(
                 artifact_paths_for_protocol(protocol)["formal_results"]
             )
@@ -760,7 +921,18 @@ def run_matrix(
                 output_root or PROJECT_ROOT / "results" / "runs"
             )
         result_root = training_output_root
-    if v3_pilot:
+    if v4_pilot:
+        assert v4_block is not None
+        assert pilot_health_report is not None
+        assert config_dir is not None
+        pilot_plan_path = _prepare_v4_pilot_plan(
+            block=v4_block,
+            protocol_path=protocol_path,
+            config_dir=config_dir,
+            manifest_rows=all_rows,
+            health_report=pilot_health_report,
+        )
+    elif v3_pilot:
         assert v3_block is not None
         assert pilot_health_report is not None
         assert config_dir is not None
@@ -819,7 +991,7 @@ def run_matrix(
                 run_id,
                 planned_hash,
                 resume_matrix=resume_matrix,
-                forbid_fresh_after_attempt=protocol_version == 3 and not dry_run,
+                forbid_fresh_after_attempt=protocol_version in (3, 4) and not dry_run,
             )
         except Exception as exc:
             failures += 1
@@ -867,6 +1039,46 @@ def run_matrix(
                     f"[{index}/{len(rows)}] {run_id}: BLOCKED: {exc}",
                     file=sys.stderr,
                 )
+                if stop_on_error:
+                    break
+                continue
+            _event(
+                event_path,
+                {
+                    "event": "run_context_validated",
+                    "index": index,
+                    "total": len(rows),
+                    "run_id": run_id,
+                    "context": run_context,
+                    "timestamp": time.time(),
+                },
+            )
+        elif v4_pilot:
+            assert pilot_health_report is not None
+            assert pilot_reference_config is not None
+            assert v4_block is not None
+            try:
+                run_context = validate_v4_current_runtime(
+                    pilot_health_report,
+                    protocol=protocol,
+                    reference_config=pilot_reference_config,
+                    block=v4_block,
+                    device=str(device or ""),
+                )
+            except PilotV4Error as exc:
+                failures += 1
+                _event(
+                    event_path,
+                    {
+                        "event": "run_blocked",
+                        "index": index,
+                        "total": len(rows),
+                        "run_id": run_id,
+                        "message": f"current runtime/data mismatch: {exc}",
+                        "timestamp": time.time(),
+                    },
+                )
+                print(f"[{index}/{len(rows)}] {run_id}: BLOCKED: {exc}", file=sys.stderr)
                 if stop_on_error:
                     break
                 continue

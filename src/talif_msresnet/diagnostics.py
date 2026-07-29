@@ -26,6 +26,7 @@ from torch import Tensor, nn
 
 
 JACOBIAN_METHOD = "Hutchinson/Rademacher reverse-over-reverse VJP"
+DIAGNOSTIC_SCHEMA_VERSION = 2
 JACOBIAN_BOUNDARY = (
     "local J=d(block_output_t)/d(block_input_t), conditional on the pre-invocation "
     "SNN state captured in one fixed full-sequence forward; temporal predecessors fixed"
@@ -75,6 +76,7 @@ def diagnostic_id(
     protocol: DiagnosticProtocol,
 ) -> str:
     payload = {
+        "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "checkpoint_sha256": checkpoint_sha256,
         "input_sha256": input_sha256,
         "protocol": asdict(protocol),
@@ -298,6 +300,9 @@ def _layer_activity(model: nn.Module, diagnostics: Mapping[str, Any]) -> pd.Data
             "spike_rate": values.get("spike_rate"),
             "spike_count": values.get("spike_count"),
             "elements": values.get("elements"),
+            "surrogate_coverage": values.get("surrogate_coverage"),
+            "surrogate_active": values.get("surrogate_active"),
+            "surrogate_elements": values.get("surrogate_elements"),
             "c_pre_max": values.get("c_pre_max"),
             "window_v1_json": _json_value(values.get("window_v1")) if "window_v1" in values else "",
             "window_v2_json": _json_value(values.get("window_v2")) if "window_v2" in values else "",
@@ -380,6 +385,7 @@ def diagnose_model(
         float(measured_jacobians["varphi_jjt"].mean()) if jacobian_complete else float("nan")
     )
     summary = {
+        "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         **dict(metadata or {}),
         "batch_size": int(inputs.shape[0]),
         "input_shape": list(inputs.shape),

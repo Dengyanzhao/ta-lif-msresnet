@@ -416,9 +416,16 @@ def check_protocol(
             "Protocol contains agreed draft values but is unsigned and unfrozen; "
             "formal training remains blocked"
         )
-    if mode in {"full", "final-test"}:
+    # v4 Phase A is an executable author freeze for health/pilot work.  Older
+    # pilot protocols intentionally retain their historical unfrozen behavior.
+    author_freeze_required = mode in {"full", "final-test"} or (
+        protocol_version == 4 and mode == "pilot"
+    )
+    if author_freeze_required:
         if status.get("frozen") is not True:
-            errors.append("protocol_status.frozen must be true before non-smoke execution")
+            errors.append(
+                "protocol_status.frozen must be true before this execution stage"
+            )
         if not _nonempty(status.get("confirmed_by")):
             errors.append("protocol_status.confirmed_by is required")
         if not _nonempty(status.get("confirmed_at")):
@@ -447,15 +454,24 @@ def check_protocol(
         for dataset in sorted(matrix_datasets):
             if thresholds.get(dataset) is None:
                 errors.append(f"analysis.validation_accuracy_thresholds.{dataset} must be frozen")
-        if protocol_version == 3:
+        if protocol_version in (3, 4):
             primary_test = analysis.get("primary_accuracy_test", {})
             if not isinstance(primary_test, Mapping):
-                errors.append("analysis.primary_accuracy_test must be defined for v3")
+                errors.append(
+                    "analysis.primary_accuracy_test must be defined for the "
+                    f"TA-LIF-only v{protocol_version} protocol"
+                )
             elif primary_test.get("decision_rule") != "p_lt_0_05_and_mean_delta_gt_0":
-                errors.append("analysis.primary_accuracy_test decision rule differs from v3")
+                errors.append(
+                    "analysis.primary_accuracy_test decision rule differs from the "
+                    f"TA-LIF-only v{protocol_version} contract"
+                )
             bootstrap = analysis.get("bootstrap", {})
             if not isinstance(bootstrap, Mapping) or bootstrap.get("resamples") != 10_000:
-                errors.append("analysis.bootstrap must define the fixed 10000-resample v3 contract")
+                errors.append(
+                    "analysis.bootstrap must define the fixed 10000-resample "
+                    f"TA-LIF-only v{protocol_version} contract"
+                )
         else:
             if analysis.get("interaction_practical_threshold_pp") is None:
                 errors.append("analysis.interaction_practical_threshold_pp must be frozen")

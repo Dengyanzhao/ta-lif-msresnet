@@ -1,18 +1,20 @@
 # TA-LIF x MS-ResNet
 
-> **Current manuscript route (2026-07-28):** the MS-ResNet component is closed
-> for the current paper. C3/C4 and all topology/interaction claims are retained
-> only as code and non-reportable audit evidence for possible future work.
-> Historical files must not be deleted or rewritten. The active work is the
-> signed and Phase A-frozen C1-versus-C2 TA-LIF-only v3 protocol in
-> `configs/protocol_v3_talif_only.yaml`. Phase B has not begun: its isolated
-> matrix generation, health gates, and non-reportable pilots must follow
-> `V3_TALIF_ONLY_RUNBOOK.md`. Formal training and test access remain blocked
-> until the aggregate pilot PASS and Phase B freeze manifest are verified. The
-> design record remains in `V3_TALIF_ONLY_PROTOCOL_DRAFT.md`; see
-> `MS_RESNET_ROUTE_CLOSURE.md` for the preservation boundary.
-> The remaining v1/v2 instructions in this README are historical documentation
-> and must not be used to launch v3 work.
+> **Current manuscript route (2026-07-29):** the current paper remains strictly
+> TA-LIF-only and C1/C2-only. MS-ResNet, C3/C4, topology effects, interactions,
+> synergy, complementarity, and composability remain closed and non-reportable.
+> The v3 CIFAR-100 pilot failed its prespecified scientific threshold. Under the
+> no-retry v3 protocol, the remaining v3 DVS pilot, aggregate validation, freeze
+> manifest, formal training, and test access are permanently blocked. The
+> unconsumed v3 DVS seed `799312121` must not be run or transferred to v4.
+> Protocol v4 is now frozen under the accountable-author authorization recorded
+> in `PREREGISTRATION_SIGNOFF_V4_TALIF_ONLY.md`. Its isolated CIFAR-100 and
+> CIFAR10-DVS health gates and four-run non-reportable pilot are authorized only
+> in the exact RTX 5090 sequence in `V4_TALIF_ONLY_RUNBOOK.md`. Formal v4 remains
+> blocked until both dataset pilots aggregate to PASS and
+> `FREEZE_MANIFEST_V4_TALIF_ONLY.json` verifies. Preserve all historical files
+> and failure evidence unchanged. The remaining v1/v2/v3 execution instructions
+> in this README are historical documentation and must not launch new work.
 
 > **Historical study status (through 2026-07-27):** formal v1 is withdrawn from reporting
 > after a structural no-learning defect and a deterministic TA-backward

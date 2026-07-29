@@ -224,6 +224,7 @@ class CIFARSpikingResNet(nn.Module):
         init_seed: int = 0,
         shared_conv_weights: Optional[Mapping[str, Tensor]] = None,
         readout: str = "mean",
+        terminal_neuron_mode: str = "always",
     ) -> None:
         super().__init__()
         depth = _depth_value(depth)
@@ -233,6 +234,10 @@ class CIFARSpikingResNet(nn.Module):
             raise ValueError("num_classes, in_channels, and base_channels must be positive")
         if readout not in ("mean", "sum", "last"):
             raise ValueError("readout must be one of: mean, sum, last")
+        if terminal_neuron_mode not in ("always", "topology_required"):
+            raise ValueError(
+                "terminal_neuron_mode must be one of: always, topology_required"
+            )
         self.condition = condition.upper()
         self.topology = _normalise_topology(topology)
         self.neuron_type = _normalise_neuron(neuron)
@@ -242,6 +247,7 @@ class CIFARSpikingResNet(nn.Module):
         self.in_channels = int(in_channels)
         self.base_channels = int(base_channels)
         self.readout = readout
+        self.terminal_neuron_mode = terminal_neuron_mode
         self.init_seed = int(init_seed)
         self.neuron_cfg = dict(neuron_cfg or {})
 
@@ -267,9 +273,15 @@ class CIFARSpikingResNet(nn.Module):
         self.stage3, channels = self._make_stage(
             block_cls, channels, self.base_channels * 4, blocks_per_stage, 2, neuron_factory
         )
-        # The terminal site is specified by the MS-ResNet composition and is
-        # mirrored in the conventional topology for a controlled readout.
-        self.terminal_neuron = neuron_factory()
+        # Legacy protocols mirrored the MS-ResNet terminal site in the
+        # conventional topology.  A conventional block already emits spikes,
+        # so the v4 repair profile can bypass that duplicate gate while still
+        # retaining it where the membrane-shortcut topology requires one.
+        self.terminal_neuron = (
+            neuron_factory()
+            if terminal_neuron_mode == "always" or self.topology == "ms_resnet"
+            else nn.Identity()
+        )
         self.fc = nn.Linear(channels, self.num_classes)
 
         self._initialize_weights(self.init_seed)
@@ -354,6 +366,9 @@ class CIFARSpikingResNet(nn.Module):
         layers: Dict[str, Dict[str, object]] = {}
         spike_count = 0.0
         elements = 0
+        surrogate_active = 0.0
+        surrogate_elements = 0
+        coverage_by_layer: List[Tuple[str, float]] = []
         for name, module in self.named_modules():
             if isinstance(module, BaseNeuron):
                 item = module.diagnostics()
@@ -368,16 +383,41 @@ class CIFARSpikingResNet(nn.Module):
                 layers[name] = item
                 spike_count += float(item["spike_count"])
                 elements += int(item["elements"])
-        return {
+                surrogate_active += float(item.get("surrogate_active", 0.0))
+                surrogate_elements += int(item.get("surrogate_elements", 0))
+                if int(item.get("surrogate_elements", 0)) > 0:
+                    coverage_by_layer.append(
+                        (name, float(item.get("surrogate_coverage", 0.0)))
+                    )
+        result: Dict[str, object] = {
             "spike_rate": spike_count / elements if elements else 0.0,
             "spike_count": spike_count,
             "elements": elements,
+            "surrogate_coverage": (
+                surrogate_active / surrogate_elements if surrogate_elements else 0.0
+            ),
+            "surrogate_active": surrogate_active,
+            "surrogate_elements": surrogate_elements,
             "timesteps": int(timesteps),
             "condition": self.condition,
             "topology": self.topology,
             "neuron": self.neuron_type,
             "layers": layers,
         }
+        if coverage_by_layer:
+            result.update(
+                {
+                    "surrogate_coverage_min": min(
+                        value for _, value in coverage_by_layer
+                    ),
+                    "surrogate_coverage_deepest": coverage_by_layer[-1][1],
+                    "surrogate_coverage_deepest_layer": coverage_by_layer[-1][0],
+                }
+            )
+            terminal = dict(coverage_by_layer).get("terminal_neuron")
+            if terminal is not None:
+                result["surrogate_coverage_terminal"] = terminal
+        return result
 
     def forward(self, x: Tensor, collect_activity: bool = False):  # type: ignore[override]
         """Classify static images or event frames.
@@ -540,6 +580,7 @@ def build_model(model_cfg: Mapping[str, Any]) -> CIFARSpikingResNet:
     - ``depth=20`` (also 56), ``time_steps=6``
     - ``num_classes=10``, ``in_channels=3``, ``base_channels=16``
     - ``neuron_cfg={}`` with tau/threshold/width/delta_min options
+    - ``terminal_neuron_mode='always'`` (legacy) or ``'topology_required'``
 
     If ``condition`` is supplied, any explicit topology/neuron must agree with
     it.  This fails fast rather than silently contaminating a factorial cell.
@@ -592,4 +633,5 @@ def build_model(model_cfg: Mapping[str, Any]) -> CIFARSpikingResNet:
         init_seed=int(cfg.get("init_seed", cfg.get("shared_init_seed", 0))),
         shared_conv_weights=cfg.get("shared_conv_weights"),
         readout=str(cfg.get("readout", "mean")).lower(),
+        terminal_neuron_mode=str(cfg.get("terminal_neuron_mode", "always")).lower(),
     )

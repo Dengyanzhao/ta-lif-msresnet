@@ -26,15 +26,22 @@ from talif_msresnet.config import (  # noqa: E402
     validate_run_mapping,
 )
 from talif_msresnet.data import build_test_loader  # noqa: E402
+from talif_msresnet.freeze import verify_formal_freeze  # noqa: E402
 from talif_msresnet.models import build_model  # noqa: E402
 from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
 from talif_msresnet.preflight import check_protocol  # noqa: E402
-from talif_msresnet.train import SEED_METRIC_FIELDS, evaluate  # noqa: E402
+from talif_msresnet.train import (  # noqa: E402
+    SEED_METRIC_FIELDS,
+    _training_environment_identity,
+    _v4_formal_execution_evidence,
+    evaluate,
+)
 from talif_msresnet.utils import (  # noqa: E402
     JSONLLogger,
     atomic_write_json,
     load_checkpoint,
     resolve_device,
+    seed_everything,
     sha256_file,
     upsert_csv_row,
     utc_now,
@@ -552,14 +559,39 @@ def main(argv: list[str] | None = None) -> int:
     default_configs = PROJECT_ROOT / artifacts["formal_matrix"]
     results_root = Path(args.results_root or default_results).resolve()
     config_dir = Path(args.config_dir or default_configs).resolve()
-    if int(protocol.get("protocol_version", 1)) == 3:
+    protocol_version = int(protocol.get("protocol_version", 1))
+    if protocol_version in (3, 4):
         if results_root != default_results.resolve():
             raise SystemExit(
-                "Protocol v3 final test must use artifact_paths.formal_results"
+                f"Protocol v{protocol_version} final test must use "
+                "artifact_paths.formal_results"
             )
         if config_dir != default_configs.resolve():
             raise SystemExit(
-                "Protocol v3 final test must use artifact_paths.formal_matrix"
+                f"Protocol v{protocol_version} final test must use "
+                "artifact_paths.formal_matrix"
+            )
+    if protocol_version == 4:
+        freeze_manifest = verify_formal_freeze(
+            project_root=PROJECT_ROOT,
+            protocol_path=args.protocol,
+            matrix_dir=config_dir,
+        )
+        execution_evidence = _v4_formal_execution_evidence(
+            protocol,
+            freeze_manifest,
+            protocol_path=args.protocol,
+        )
+        seed_everything(0, deterministic=True)
+        selected_device = resolve_device(args.device)
+        _identity, environment_sha256 = _training_environment_identity(
+            selected_device,
+            amp=False,
+            deterministic=True,
+        )
+        if environment_sha256 != execution_evidence["training_environment_sha256"]:
+            raise SystemExit(
+                "Protocol v4 final-test environment differs from the pilot/formal freeze"
             )
     rows = _read_expected(
         config_dir,

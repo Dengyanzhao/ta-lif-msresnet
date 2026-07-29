@@ -49,6 +49,8 @@ def test_resume_rejects_a_different_training_environment(tmp_path: Path) -> None
     (run_dir / "run_manifest.json").write_text(
         json.dumps(
             {
+                "run_id": "run",
+                "config_hash": "config-hash",
                 "environment": {
                     "training_environment_sha256": "same-environment",
                 }
@@ -56,18 +58,26 @@ def test_resume_rejects_a_different_training_environment(tmp_path: Path) -> None
         ),
         encoding="utf-8",
     )
+    expected_identity = {
+        "expected_run_id": "run",
+        "expected_config_hash": "config-hash",
+    }
 
     previous = _validate_resume_run_environment(
-        run_dir, checkpoint, "same-environment"
+        run_dir, checkpoint, "same-environment", **expected_identity
     )
     assert previous["environment"]["training_environment_sha256"] == "same-environment"
     with pytest.raises(RuntimeError, match="Cross-environment"):
-        _validate_resume_run_environment(run_dir, checkpoint, "other-environment")
+        _validate_resume_run_environment(
+            run_dir, checkpoint, "other-environment", **expected_identity
+        )
     foreign = tmp_path / "foreign" / "last.pt"
     foreign.parent.mkdir()
     foreign.write_bytes(b"checkpoint")
     with pytest.raises(RuntimeError, match="current run directory"):
-        _validate_resume_run_environment(run_dir, foreign, "same-environment")
+        _validate_resume_run_environment(
+            run_dir, foreign, "same-environment", **expected_identity
+        )
 
 
 def test_unfrozen_pilot_requires_a_separate_output_root() -> None:

@@ -189,6 +189,8 @@ class BaseNeuron(nn.Module):
         self._count: Optional[Tensor] = None
         self._spike_sum: Optional[Tensor] = None
         self._element_count = 0
+        self._surrogate_active_sum: Optional[Tensor] = None
+        self._surrogate_element_count = 0
         # Standalone neurons collect by default.  The full model explicitly
         # disables this flag for normal training to avoid one reduction per
         # layer and time step.
@@ -224,6 +226,8 @@ class BaseNeuron(nn.Module):
         if clear_stats:
             self._spike_sum = None
             self._element_count = 0
+            self._surrogate_active_sum = None
+            self._surrogate_element_count = 0
 
     # Common spelling used by several SNN toolkits.
     reset = reset_state
@@ -241,7 +245,12 @@ class BaseNeuron(nn.Module):
     def set_collect_activity(self, enabled: bool) -> None:
         self._collect_activity = bool(enabled)
 
-    def _record(self, spike: Tensor, membrane: Tensor) -> None:
+    def _record(
+        self,
+        spike: Tensor,
+        membrane: Tensor,
+        surrogate_active: Optional[Tensor] = None,
+    ) -> None:
         if not self._collect_activity:
             self.last_spike = None
             self.last_membrane = None
@@ -250,16 +259,37 @@ class BaseNeuron(nn.Module):
         step_sum = detached.sum()
         self._spike_sum = step_sum if self._spike_sum is None else self._spike_sum + step_sum
         self._element_count += detached.numel()
+        if surrogate_active is not None:
+            active = surrogate_active.detach().sum()
+            self._surrogate_active_sum = (
+                active
+                if self._surrogate_active_sum is None
+                else self._surrogate_active_sum + active
+            )
+            self._surrogate_element_count += surrogate_active.numel()
         self.last_spike = detached
         self.last_membrane = membrane.detach()
 
     def diagnostics(self) -> Dict[str, object]:
         spike_sum = float(self._spike_sum.item()) if self._spike_sum is not None else 0.0
         rate = spike_sum / self._element_count if self._element_count else 0.0
+        surrogate_active = (
+            float(self._surrogate_active_sum.item())
+            if self._surrogate_active_sum is not None
+            else 0.0
+        )
+        surrogate_coverage = (
+            surrogate_active / self._surrogate_element_count
+            if self._surrogate_element_count
+            else 0.0
+        )
         out: Dict[str, object] = {
             "spike_rate": rate,
             "spike_count": spike_sum,
             "elements": self._element_count,
+            "surrogate_coverage": surrogate_coverage,
+            "surrogate_active": surrogate_active,
+            "surrogate_elements": self._surrogate_element_count,
         }
         if self.last_c_pre is not None:
             out["c_pre_max"] = int(self.last_c_pre.max().item())
@@ -313,7 +343,8 @@ class LIFNeuron(BaseNeuron):
         membrane = torch.where(fired, fired_branch, quiet_branch)
         self._mem = membrane
         self.last_c_pre = None
-        self._record(spike, membrane)
+        surrogate_active = (u >= v1) & (u <= v2) if self._collect_activity else None
+        self._record(spike, membrane, surrogate_active)
         return spike
 
 
@@ -407,7 +438,8 @@ class TALIFNeuron(BaseNeuron):
         self.last_c_pre = c_pre.detach().clone()
         # History is a routing/index state, never a differentiable quantity.
         self._count = (c_pre + spike.detach().to(dtype=torch.long)).clamp(max=self.steps - 1)
-        self._record(spike, membrane)
+        surrogate_active = (u >= v1) & (u <= v2) if self._collect_activity else None
+        self._record(spike, membrane, surrogate_active)
         return spike
 
     def extra_repr(self) -> str:

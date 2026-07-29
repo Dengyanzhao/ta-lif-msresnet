@@ -1,10 +1,20 @@
 # TA-LIF-only v3 execution runbook
 
-This runbook is intentionally staged. The checked-in v3 protocol is signed and
-Phase A-frozen. Phase B artifacts do not yet exist. The author freeze permits
-only the isolated Phase B generation, health-gate, and non-reportable pilot
-steps below; formal training remains blocked until the aggregate pilot PASS and
-Phase B freeze manifest are verified.
+> **Terminal status (2026-07-29): V3 PILOT FAILED; V3 FORMAL PERMANENTLY
+> BLOCKED.** The CIFAR-100 C1/C2 pilot consumed seed `474123945` and failed its
+> prespecified scientific acceptance threshold. Under the signed no-retry rule,
+> no remaining command in this runbook is authorized. Do not start the v3
+> CIFAR10-DVS gate or pilot, run aggregate validation, create the v3 freeze
+> manifest, start formal training, or access a test set. CIFAR10-DVS seed
+> `799312121` remains unconsumed and reserved to v3; it must not be run, reused,
+> or transferred to v4.
+
+This runbook is retained as a historical record of the prospective v3 workflow.
+The failure archive and all generated v3 artifacts must remain non-reportable
+engineering evidence. Any continuation requires a new protocol version, new
+unused seed, explicit author decision, and exact-command authorization. The
+`UNVERIFIED` `V4_TALIF_ONLY_PROTOCOL_DRAFT.md` does not itself provide that
+authorization.
 
 ## Phase A: author/source freeze (completed)
 

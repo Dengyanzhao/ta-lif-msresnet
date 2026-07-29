@@ -1,0 +1,169 @@
+protocol_version: 4
+experiment: E1
+data:
+  dataset: cifar10dvs
+  root: data/cifar10dvs
+  num_classes: 10
+  in_channels: 2
+  val_fraction: 0.125
+  split_seed: 2024
+  split_manifest: data/manifests/cifar10dvs_seed2024.json
+  frames_path: data/cifar10dvs/processed
+  labels_path: null
+  test_frames_path: data/cifar10dvs/processed
+  test_labels_path: null
+  dvs_time_bins: 10
+  dvs_height: 48
+  dvs_width: 48
+  dvs_resize_mode: nearest
+  dvs_test_fraction: 0.2
+  dvs_split_seed: 2024
+  normalize: false
+  augment: true
+  autoaugment: false
+  download: true
+  num_workers: 0
+  pin_memory: true
+model:
+  condition: C1
+  topology: spiking_resnet
+  neuron: lif
+  depth: 20
+  time_steps: 10
+  num_classes: 10
+  in_channels: 2
+  base_channels: 16
+  neuron_cfg:
+    tau: 0.5
+    threshold: 1.0
+    v_rest: 0.0
+    v_reset: 0.0
+    width: 1.0
+    delta_min: 0.05
+  terminal_neuron_mode: topology_required
+optimizer:
+  epochs: 120
+  batch_size: 64
+  lr: 0.025
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones:
+  - 75
+  - 90
+  - 105
+  gamma: 0.1
+  ta_start_fraction: 0.041666666666666664
+  ta_lr_scale: 0.1
+  ta_weight_decay: 0.0
+  grad_clip: 1.0
+  warmup_epochs: 5
+  exclude_norm_and_bias_from_weight_decay: true
+  label_smoothing: 0.0
+  cutmix_alpha: 0.0
+  cutmix_probability: 0.0
+runtime:
+  seed: 856172396
+  device: auto
+  output_dir: results/formal_v4_talif_only
+  run_id: E1_cifar10dvs_d20_t10_C1_s856172396
+  checkpoint_every: 1
+  log_every: 100
+  amp: false
+  deterministic: true
+  dry_run: false
+  limit_batches: null
+  resume: null
+final_test: false
+analysis:
+  collect_activity: false
+  accuracy_scale: proportion
+  validation_accuracy_thresholds:
+    cifar100: 0.6
+    cifar10dvs: 0.6
+  convergence_epoch_rule: first_validation_epoch_at_or_above_threshold
+  nonconvergence_rule: not_reached_by_final_epoch_no_exclusion
+  failure_rule: nonfinite_loss_missing_best_checkpoint_or_unsuccessful_process_blocks_complete_pair
+  alpha: 0.05
+  confidence_level: 0.95
+  primary_dataset: cifar100
+  replication_dataset: cifar10dvs
+  primary_accuracy_test:
+    estimand: mean_seed_paired_c2_minus_c1_test_accuracy_pp
+    blocking_factor: seed
+    test_statistic: one_sample_t_over_seed_level_differences
+    null_hypothesis: mean_delta_le_0
+    alternative_hypothesis: mean_delta_gt_0
+    sidedness: one_sided_greater
+    estimation_interval: two_sided_95_percent_t
+    degrees_of_freedom: 4
+    decision_rule: p_lt_0_05_and_mean_delta_gt_0
+    normality_pretest_switch: forbidden
+    zero_variance_rule: not_estimable_primary_inconclusive
+  replication_analysis:
+    method: same_paired_t_estimate_interval_and_raw_differences
+    role: prespecified_replication_external_validity_not_confirmatory
+    cross_dataset_multiplicity: none_single_confirmatory_primary
+    cannot_rescue_primary: true
+  sign_flip:
+    assignments: 32
+    enumeration: all_2_power_5_seed_level_sign_flips
+    sidedness: one_sided_greater
+    role: sensitivity_only_cannot_rescue_primary
+  bootstrap:
+    resamples: 10000
+    resampling_unit: complete_seed_pair
+    cellwise_resampling: forbidden
+    rng: numpy_generator_pcg64
+    index_draw: integers_0_5_size_10000_by_5_endpoint_false
+    statistic: mean_seed_paired_c2_minus_c1_test_accuracy_pp
+    interval: two_sided_95_percent_percentile
+    quantile_method: linear
+    seeds:
+      cifar100: 874085245
+      cifar10dvs: 2019339204
+    role: sensitivity_only_cannot_rescue_primary
+  model_selection:
+    checkpoint: best.pt
+    primary_order: maximum_validation_accuracy
+    first_tie_breaker: minimum_validation_loss
+    exact_tie_breaker: earliest_epoch
+    test_based_selection: forbidden
+  test_access:
+    training_config_final_test: false
+    when: after_all_20_runs_and_best_checkpoints_pass_frozen_audit
+    access_count_per_checkpoint: 1
+    reselection_or_repeated_evaluation: forbidden
+    ambiguous_interruption: stop_document_and_obtain_author_decision
+  run_handling:
+    pilot_in_reportable_analysis: forbidden
+    failed_run_records: retain
+    seed_substitution: forbidden
+    outlier_exclusion: forbidden
+    nonconvergence_excludes_run: false
+    incomplete_seed_pair: unresolved_no_partial_analysis
+    cross_environment_checkpoint_resume: forbidden
+    protocol_change_after_first_reportable_run: forbidden
+  wording_gates:
+    cifar100_improved: primary_p_lt_0_05_and_mean_delta_gt_0
+    primary_not_passed: inconclusive_no_equivalence_or_no_effect_claim
+    dvs_cannot_rescue_primary: true
+    dvs_directional_support: mean_delta_gt_0
+    dvs_replication_claim: one_sided_p_lt_0_05_and_mean_delta_gt_0
+    cross_domain_improvement: both_dataset_tests_pass_and_both_means_gt_0
+  efficiency:
+    role: descriptive_only
+    contrast: C2_over_C1_paired_within_seed
+    metrics:
+    - training_time
+    - cuda_latency
+    - peak_memory
+    confidence_interval: paired_two_sided_95_percent_t_on_log_ratio
+    homogeneous_environment_required: true
+    energy: not_assessed
+  matrix_key:
+  - cifar10dvs
+  - 20
+  - 10
+  - C1
+  - 856172396
+  protocol_hash: 68bb14e892a696bc87b3a2d3f196b81fc58b299dd0c485cf72a50bb5fd0b0a54

@@ -21,7 +21,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .config import RunConfig, load_protocol, load_run_config
+from .config import (
+    RunConfig,
+    artifact_paths_for_protocol,
+    load_protocol,
+    load_run_config,
+)
 from .data import build_loaders
 from .freeze import FreezeGateError, verify_formal_freeze
 from .models import build_model
@@ -72,6 +77,16 @@ SEED_METRIC_FIELDS: Tuple[str, ...] = (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PILOT_PLAN_PATH = PROJECT_ROOT / "environment" / "unfrozen_pilot_plan.json"
+OPTIMIZER_GROUP_MANIFEST_SCHEMA_VERSION = 1
+_OPTIMIZER_GROUP_IDENTITY_KEYS = (
+    "index",
+    "role",
+    "parameter_names",
+    "parameter_count",
+    "parameter_numel",
+    "initial_lr",
+    "weight_decay",
+)
 
 
 def _is_ta_parameter(name: str) -> bool:
@@ -113,32 +128,222 @@ def split_parameter_groups(model: torch.nn.Module, is_ta_model: bool) -> Tuple[L
     return base, ta, ta_names
 
 
+_NORMALIZATION_MODULES = (
+    torch.nn.BatchNorm1d,
+    torch.nn.BatchNorm2d,
+    torch.nn.BatchNorm3d,
+    torch.nn.SyncBatchNorm,
+    torch.nn.InstanceNorm1d,
+    torch.nn.InstanceNorm2d,
+    torch.nn.InstanceNorm3d,
+    torch.nn.GroupNorm,
+    torch.nn.LayerNorm,
+)
+
+
+def _split_base_weight_decay_groups(
+    model: torch.nn.Module,
+    ta_parameters: Sequence[torch.nn.Parameter],
+) -> Tuple[
+    List[torch.nn.Parameter],
+    List[str],
+    List[torch.nn.Parameter],
+    List[str],
+]:
+    """Separate base weights from normalization parameters and biases."""
+
+    ta_ids = {id(parameter) for parameter in ta_parameters}
+    normalization_ids = {
+        id(parameter)
+        for module in model.modules()
+        if isinstance(module, _NORMALIZATION_MODULES)
+        for parameter in module.parameters(recurse=False)
+    }
+    decay: List[torch.nn.Parameter] = []
+    decay_names: List[str] = []
+    no_decay: List[torch.nn.Parameter] = []
+    no_decay_names: List[str] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or id(parameter) in ta_ids:
+            continue
+        if (
+            id(parameter) in normalization_ids
+            or name == "bias"
+            or name.endswith(".bias")
+        ):
+            no_decay.append(parameter)
+            no_decay_names.append(name)
+        else:
+            decay.append(parameter)
+            decay_names.append(name)
+    return decay, decay_names, no_decay, no_decay_names
+
+
 def build_optimizer_and_scheduler(
     model: torch.nn.Module, config: RunConfig,
-) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.MultiStepLR, List[torch.nn.Parameter], List[str], int]:
+) -> Tuple[
+    torch.optim.Optimizer,
+    torch.optim.lr_scheduler.LRScheduler,
+    List[torch.nn.Parameter],
+    List[str],
+    int,
+]:
     opt = config.optimizer
+    if config.protocol_version < 4 and (
+        opt.warmup_epochs != 0
+        or opt.exclude_norm_and_bias_from_weight_decay
+    ):
+        raise RuntimeError("v4 optimizer repairs require protocol_version >= 4")
     is_ta_model = config.model.neuron == "ta_lif"
     base, ta, ta_names = split_parameter_groups(model, is_ta_model)
-    groups: List[Dict[str, Any]] = [
-        {"params": base, "lr": opt.lr, "weight_decay": opt.weight_decay, "role": "base"},
-    ]
+    groups: List[Dict[str, Any]] = []
+    group_specs: List[Dict[str, Any]] = []
+
+    def add_group(
+        parameters: Sequence[torch.nn.Parameter],
+        names: Sequence[str],
+        *,
+        role: str,
+        lr: float,
+        weight_decay: float,
+    ) -> None:
+        groups.append(
+            {
+                "params": list(parameters),
+                "lr": lr,
+                "weight_decay": weight_decay,
+            }
+        )
+        group_specs.append(
+            {
+                "role": role,
+                "parameter_names": list(names),
+                "initial_lr": float(lr),
+                "weight_decay": float(weight_decay),
+            }
+        )
+
+    parameter_name_by_id = {id(parameter): name for name, parameter in model.named_parameters()}
+    if opt.exclude_norm_and_bias_from_weight_decay:
+        decay, decay_names, no_decay, no_decay_names = _split_base_weight_decay_groups(
+            model, ta
+        )
+        if len(decay) + len(no_decay) != len(base):
+            raise RuntimeError("Base optimizer parameter partition is incomplete")
+        if decay:
+            add_group(
+                decay, decay_names, role="base_decay", lr=opt.lr,
+                weight_decay=opt.weight_decay,
+            )
+        if no_decay:
+            add_group(
+                no_decay, no_decay_names, role="base_no_decay",
+                lr=opt.lr, weight_decay=0.0,
+            )
+    else:
+        add_group(
+            base, [parameter_name_by_id[id(parameter)] for parameter in base],
+            role="base", lr=opt.lr, weight_decay=opt.weight_decay,
+        )
     if ta:
         # The scheduler sees the intended TA learning rate from the beginning;
         # gradients are disabled until the prespecified 5% warm-up ends.
         for parameter in ta:
             parameter.requires_grad_(False)
-        groups.append({
-            "params": ta,
-            "lr": opt.lr * opt.ta_lr_scale,
-            "weight_decay": opt.ta_weight_decay,
-            "role": "ta",
-        })
+        add_group(
+            ta, ta_names, role="ta", lr=opt.lr * opt.ta_lr_scale,
+            weight_decay=opt.ta_weight_decay,
+        )
     optimizer = torch.optim.SGD(groups, lr=opt.lr, momentum=opt.momentum)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=list(opt.milestones), gamma=opt.gamma,
+    setattr(optimizer, "_talif_group_specs", tuple(group_specs))
+    setattr(
+        optimizer,
+        "_talif_parameter_ids",
+        frozenset(id(parameter) for group in groups for parameter in group["params"]),
     )
+    if opt.warmup_epochs:
+        def schedule_factor(epoch: int) -> float:
+            warmup = min(1.0, float(epoch + 1) / float(opt.warmup_epochs))
+            decays = sum(epoch >= milestone for milestone in opt.milestones)
+            return warmup * (opt.gamma ** decays)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=schedule_factor
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=list(opt.milestones), gamma=opt.gamma,
+        )
     activation_epoch = int(math.ceil(opt.epochs * opt.ta_start_fraction))
     return optimizer, scheduler, ta, ta_names, activation_epoch
+
+
+def optimizer_group_manifest(
+    model: torch.nn.Module, optimizer: torch.optim.Optimizer
+) -> Dict[str, Any]:
+    """Return auditable group identities without polluting optimizer state."""
+
+    specs = getattr(optimizer, "_talif_group_specs", None)
+    if not isinstance(specs, Sequence) or len(specs) != len(optimizer.param_groups):
+        raise RuntimeError("Optimizer group specifications are missing or malformed")
+    name_by_id = {id(parameter): name for name, parameter in model.named_parameters()}
+    seen: set[int] = set()
+    groups: List[Dict[str, Any]] = []
+    for index, (group, raw_spec) in enumerate(zip(optimizer.param_groups, specs)):
+        if not isinstance(raw_spec, Mapping):
+            raise RuntimeError("Optimizer group specification must be a mapping")
+        parameters = list(group["params"])
+        identifiers = [id(parameter) for parameter in parameters]
+        if len(set(identifiers)) != len(identifiers) or seen.intersection(identifiers):
+            raise RuntimeError("Optimizer parameter groups contain duplicate parameters")
+        seen.update(identifiers)
+        try:
+            names = [name_by_id[identifier] for identifier in identifiers]
+        except KeyError as exc:
+            raise RuntimeError("Optimizer contains a parameter not owned by the model") from exc
+        expected_names = list(raw_spec.get("parameter_names", ()))
+        if names != expected_names:
+            raise RuntimeError(
+                f"Optimizer group {index} parameter order differs from its audit specification"
+            )
+        initial_lr = float(raw_spec["initial_lr"])
+        if "initial_lr" in group and float(group["initial_lr"]) != initial_lr:
+            raise RuntimeError(f"Optimizer group {index} initial_lr drifted")
+        weight_decay = float(group.get("weight_decay", 0.0))
+        if weight_decay != float(raw_spec["weight_decay"]):
+            raise RuntimeError(f"Optimizer group {index} weight_decay drifted")
+        groups.append(
+            {
+                "index": index,
+                "role": str(raw_spec["role"]),
+                "parameter_names": names,
+                "parameter_count": len(parameters),
+                "parameter_numel": sum(parameter.numel() for parameter in parameters),
+                "initial_lr": initial_lr,
+                "current_lr": float(group["lr"]),
+                "weight_decay": weight_decay,
+            }
+        )
+    expected_ids = getattr(optimizer, "_talif_parameter_ids", None)
+    model_ids = {id(parameter) for parameter in model.parameters()}
+    if not isinstance(expected_ids, frozenset) or seen != expected_ids:
+        raise RuntimeError(
+            "Optimizer parameter groups do not cover every model parameter exactly once"
+        )
+    if not seen.issubset(model_ids):
+        raise RuntimeError("Optimizer parameter ownership changed after construction")
+    return {
+        "schema_version": OPTIMIZER_GROUP_MANIFEST_SCHEMA_VERSION,
+        "groups": groups,
+    }
+
+
+def _optimizer_learning_rates(optimizer: torch.optim.Optimizer) -> Dict[str, float]:
+    specs = getattr(optimizer, "_talif_group_specs", ())
+    return {
+        str(spec.get("role", index)): float(group["lr"])
+        for index, (group, spec) in enumerate(zip(optimizer.param_groups, specs))
+    }
 
 
 def _set_ta_enabled(parameters: Iterable[torch.nn.Parameter], enabled: bool) -> None:
@@ -219,6 +424,35 @@ def _block_gradient_norms(model: torch.nn.Module) -> Dict[str, float]:
     return values
 
 
+def _parameter_role_norms(model: torch.nn.Module) -> Dict[str, float]:
+    """Summarize parameter norms by owner for collapse diagnostics."""
+
+    modules = dict(model.named_modules())
+    squared = {
+        "convolution": 0.0,
+        "normalization": 0.0,
+        "classifier": 0.0,
+        "ta": 0.0,
+        "other": 0.0,
+    }
+    for name, parameter in model.named_parameters():
+        owner_name = name.rsplit(".", 1)[0] if "." in name else ""
+        owner = modules.get(owner_name)
+        if _is_ta_parameter(name):
+            role = "ta"
+        elif isinstance(owner, torch.nn.Conv2d):
+            role = "convolution"
+        elif isinstance(owner, _NORMALIZATION_MODULES):
+            role = "normalization"
+        elif isinstance(owner, torch.nn.Linear):
+            role = "classifier"
+        else:
+            role = "other"
+        norm = parameter.detach().float().norm(2).item()
+        squared[role] += norm * norm
+    return {role: math.sqrt(value) for role, value in squared.items()}
+
+
 def _coefficient_of_variation(values: Sequence[float]) -> float:
     finite = np.asarray([value for value in values if math.isfinite(value)], dtype=float)
     if finite.size < 2 or float(finite.mean()) == 0.0:
@@ -272,6 +506,8 @@ def train_one_epoch(
     losses, accuracies = AverageMeter(), AverageMeter()
     global_gradient_norms: List[float] = []
     block_gradient_cvs: List[float] = []
+    block_nonzero_fractions: List[float] = []
+    all_zero_block_gradient_batches = 0
     collect_activity = bool(config.analysis.get("collect_activity", False))
     diagnostics_accumulator: Dict[str, List[float]] = {}
     started = time.perf_counter()
@@ -305,6 +541,15 @@ def train_one_epoch(
             raise FloatingPointError(f"Non-finite gradient norm at epoch={epoch}, batch={batch_index}")
         global_gradient_norms.append(grad_norm)
         block_norms = _block_gradient_norms(model)
+        nonzero_block_fraction = (
+            sum(value > 0.0 for value in block_norms.values()) / len(block_norms)
+            if block_norms
+            else float("nan")
+        )
+        if math.isfinite(nonzero_block_fraction):
+            block_nonzero_fractions.append(nonzero_block_fraction)
+            if nonzero_block_fraction == 0.0:
+                all_zero_block_gradient_batches += 1
         block_cv = _coefficient_of_variation(list(block_norms.values()))
         if math.isfinite(block_cv):
             block_gradient_cvs.append(block_cv)
@@ -329,6 +574,7 @@ def train_one_epoch(
                 "train_batch", epoch=epoch, batch=batch_index + 1,
                 loss=losses.average, accuracy=accuracies.average,
                 global_gradient_norm=grad_norm, block_gradient_cv=block_cv,
+                nonzero_block_gradient_fraction=nonzero_block_fraction,
                 block_gradient_norms=block_norms, cutmix_weight=cutmix_weight,
             )
     if losses.count == 0:
@@ -343,6 +589,23 @@ def train_one_epoch(
         "gradient_mean": grad_mean,
         "gradient_cv": grad_cv,
         "gradient_cv_method": "mean_batch_cv_of_residual_block_parameter_gradient_l2",
+        "nonzero_block_gradient_fraction_mean": (
+            float(np.mean(block_nonzero_fractions))
+            if block_nonzero_fractions
+            else float("nan")
+        ),
+        "nonzero_block_gradient_fraction_min": (
+            float(np.min(block_nonzero_fractions))
+            if block_nonzero_fractions
+            else float("nan")
+        ),
+        "all_zero_block_gradient_batches": all_zero_block_gradient_batches,
+        "all_zero_block_gradient_batch_fraction": (
+            all_zero_block_gradient_batches / len(block_nonzero_fractions)
+            if block_nonzero_fractions
+            else float("nan")
+        ),
+        "parameter_norms": _parameter_role_norms(model),
         "seconds": elapsed,
     }
     result["diagnostics"] = {key: float(np.mean(values)) for key, values in diagnostics_accumulator.items()}
@@ -421,6 +684,7 @@ def _checkpoint_payload(
     payload = {
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
+        "optimizer_group_manifest": optimizer_group_manifest(model, optimizer),
         "scheduler_state": scheduler.state_dict(),
         "epoch": int(epoch),
         "best_val": dict(best_val),
@@ -433,6 +697,132 @@ def _checkpoint_payload(
     if training_environment_sha256 is not None:
         payload["training_environment_sha256"] = training_environment_sha256
     return payload
+
+
+def _validate_optimizer_group_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    checkpoint: Mapping[str, Any],
+    *,
+    require_manifest: bool,
+) -> None:
+    """Validate group identity before PyTorch can restore state by position."""
+
+    saved_manifest = checkpoint.get("optimizer_group_manifest")
+    if saved_manifest is None:
+        if require_manifest:
+            raise RuntimeError(
+                "Resume checkpoint is missing the required optimizer_group_manifest"
+            )
+        return
+    if not isinstance(saved_manifest, Mapping):
+        raise RuntimeError("Resume optimizer_group_manifest must be a mapping")
+    if saved_manifest.get("schema_version") != OPTIMIZER_GROUP_MANIFEST_SCHEMA_VERSION:
+        raise RuntimeError("Resume optimizer_group_manifest schema is unsupported")
+    saved_groups = saved_manifest.get("groups")
+    if not isinstance(saved_groups, list):
+        raise RuntimeError("Resume optimizer_group_manifest groups must be a list")
+    current_groups = optimizer_group_manifest(model, optimizer)["groups"]
+    current_state_groups = optimizer.state_dict()["param_groups"]
+    optimizer_state = checkpoint.get("optimizer_state")
+    state_groups = (
+        optimizer_state.get("param_groups")
+        if isinstance(optimizer_state, Mapping)
+        else None
+    )
+    if not isinstance(state_groups, list):
+        raise RuntimeError("Resume checkpoint optimizer_state param_groups are malformed")
+    if not (
+        len(saved_groups)
+        == len(current_groups)
+        == len(current_state_groups)
+        == len(state_groups)
+    ):
+        raise RuntimeError("Resume optimizer group counts do not match")
+    for index, (saved, current, current_state, state) in enumerate(
+        zip(saved_groups, current_groups, current_state_groups, state_groups)
+    ):
+        if not isinstance(saved, Mapping) or not isinstance(state, Mapping):
+            raise RuntimeError(f"Resume optimizer group {index} is malformed")
+        for key in _OPTIMIZER_GROUP_IDENTITY_KEYS:
+            if saved.get(key) != current.get(key):
+                raise RuntimeError(
+                    f"Resume optimizer group {index} differs for {key}"
+                )
+        if any(key in state for key in ("parameter_names", "role")):
+            raise RuntimeError(
+                f"Resume optimizer group {index} embeds audit metadata in optimizer_state"
+            )
+        if len(state.get("params", ())) != saved["parameter_count"]:
+            raise RuntimeError(
+                f"Resume optimizer group {index} state parameter count differs"
+            )
+        if list(state["params"]) != list(current_state["params"]):
+            raise RuntimeError(
+                f"Resume optimizer group {index} state parameter order differs"
+            )
+        for manifest_key, state_key in (
+            ("current_lr", "lr"),
+            ("initial_lr", "initial_lr"),
+            ("weight_decay", "weight_decay"),
+        ):
+            if state_key not in state or float(saved[manifest_key]) != float(state[state_key]):
+                raise RuntimeError(
+                    f"Resume optimizer group {index} {manifest_key} differs from optimizer_state"
+                )
+
+
+def _validate_resume_optimizer_manifest_identity(
+    previous_run_manifest: Mapping[str, Any],
+    checkpoint: Mapping[str, Any],
+) -> None:
+    """Bind a pre-existing run manifest to its resume checkpoint."""
+
+    previous_manifest = previous_run_manifest.get("optimizer_group_manifest")
+    checkpoint_manifest = checkpoint.get("optimizer_group_manifest")
+    if previous_manifest is None and checkpoint_manifest is None:
+        return
+    if previous_manifest is None or checkpoint_manifest is None:
+        raise RuntimeError(
+            "Previous run manifest and resume checkpoint disagree on "
+            "optimizer_group_manifest presence"
+        )
+    manifests = {
+        "previous run": previous_manifest,
+        "resume checkpoint": checkpoint_manifest,
+    }
+    groups_by_source: Dict[str, list[Any]] = {}
+    for source, manifest in manifests.items():
+        if not isinstance(manifest, Mapping):
+            raise RuntimeError(f"{source} optimizer_group_manifest must be a mapping")
+        if manifest.get("schema_version") != OPTIMIZER_GROUP_MANIFEST_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{source} optimizer_group_manifest schema is unsupported"
+            )
+        groups = manifest.get("groups")
+        if not isinstance(groups, list):
+            raise RuntimeError(
+                f"{source} optimizer_group_manifest groups must be a list"
+            )
+        groups_by_source[source] = groups
+
+    previous_groups = groups_by_source["previous run"]
+    checkpoint_groups = groups_by_source["resume checkpoint"]
+    if len(previous_groups) != len(checkpoint_groups):
+        raise RuntimeError(
+            "Previous run manifest and resume checkpoint optimizer group counts differ"
+        )
+    for index, (previous, saved) in enumerate(
+        zip(previous_groups, checkpoint_groups)
+    ):
+        if not isinstance(previous, Mapping) or not isinstance(saved, Mapping):
+            raise RuntimeError(f"Resume optimizer group identity {index} is malformed")
+        for key in _OPTIMIZER_GROUP_IDENTITY_KEYS:
+            if previous.get(key) != saved.get(key):
+                raise RuntimeError(
+                    "Previous run manifest and resume checkpoint optimizer group "
+                    f"{index} differ for {key}"
+                )
 
 
 def validate_resume_checkpoint_path(path: str | Path) -> Path:
@@ -454,6 +844,7 @@ def _load_resume(
     scheduler: Any,
     config: RunConfig,
     expected_training_environment_sha256: str | None = None,
+    expected_run_manifest: Mapping[str, Any] | None = None,
 ) -> Tuple[int, Dict[str, Any], List[Dict[str, Any]]]:
     path = validate_resume_checkpoint_path(path)
     checkpoint = load_checkpoint(path, map_location="cpu")
@@ -471,9 +862,26 @@ def _load_resume(
     )
     if isinstance(checkpoint_runtime, Mapping) and checkpoint_runtime.get("dry_run"):
         raise RuntimeError("A smoke/dry-run checkpoint cannot be resumed as a full experiment")
+    if expected_run_manifest is not None:
+        _validate_resume_optimizer_manifest_identity(
+            expected_run_manifest, checkpoint
+        )
+    _validate_optimizer_group_checkpoint(
+        model, optimizer, checkpoint, require_manifest=config.protocol_version >= 4
+    )
     model.load_state_dict(checkpoint["model_state"])
     optimizer.load_state_dict(checkpoint["optimizer_state"])
+    for group in optimizer.param_groups:
+        group.pop("parameter_names", None)
+        group.pop("role", None)
     scheduler.load_state_dict(checkpoint["scheduler_state"])
+    saved_manifest = checkpoint.get("optimizer_group_manifest")
+    if saved_manifest is not None and optimizer_group_manifest(model, optimizer) != dict(
+        saved_manifest
+    ):
+        raise RuntimeError(
+            "Loaded optimizer groups differ from optimizer_group_manifest"
+        )
     if "rng_state" in checkpoint:
         restore_rng_state(checkpoint["rng_state"])
     history = checkpoint.get("train_history", [])
@@ -490,6 +898,9 @@ def _validate_resume_run_environment(
     run_dir: Path,
     resume_path: str | Path,
     current_environment_sha256: str,
+    *,
+    expected_run_id: str,
+    expected_config_hash: str,
 ) -> dict[str, Any]:
     """Validate the pre-existing run identity before its manifest is replaced."""
 
@@ -507,6 +918,14 @@ def _validate_resume_run_environment(
         raise RuntimeError(f"Cannot read previous run manifest: {exc}") from exc
     if not isinstance(previous, dict):
         raise RuntimeError("Previous run manifest must be a JSON object")
+    if previous.get("run_id") != expected_run_id:
+        raise RuntimeError(
+            "Previous run manifest run_id does not match the current run"
+        )
+    if previous.get("config_hash") != expected_config_hash:
+        raise RuntimeError(
+            "Previous run manifest config_hash does not match the current run"
+        )
     environment = previous.get("environment")
     previous_hash = (
         environment.get("training_environment_sha256")
@@ -648,6 +1067,32 @@ def run(
 ) -> Dict[str, Any]:
     """Execute a run, preserving both successful and failed run artifacts."""
 
+    expected_v4_environment: str | None = None
+    if config.protocol_version == 4:
+        if not isinstance(orchestrator_evidence, Mapping):
+            raise ValueError(
+                "Protocol v4 requires validated pilot/formal execution evidence"
+            )
+        if orchestrator_evidence.get("protocol_version") != 4:
+            raise ValueError("Protocol v4 execution evidence has the wrong version")
+        if orchestrator_evidence.get("execution_stage") not in {"pilot", "formal"}:
+            raise ValueError("Protocol v4 execution evidence has no valid stage")
+        expected_v4_environment = str(
+            orchestrator_evidence.get("training_environment_sha256", "")
+        )
+        if len(expected_v4_environment) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in expected_v4_environment
+        ):
+            raise ValueError(
+                "Protocol v4 execution evidence has no valid training environment hash"
+            )
+    if config.protocol_version < 4 and (
+        config.model.terminal_neuron_mode != "always"
+        or config.optimizer.warmup_epochs != 0
+        or config.optimizer.exclude_norm_and_bias_from_weight_decay
+    ):
+        raise ValueError("Post-v3 repair controls cannot execute under protocols v1-v3")
     if config.final_test:
         raise ValueError(
             "Training configs must keep final_test=false; use scripts/evaluate_checkpoints.py "
@@ -657,18 +1102,29 @@ def run(
     started_clock = time.perf_counter()
     seed_everything(config.runtime.seed, config.runtime.deterministic)
     device = resolve_device(config.runtime.device)
+    training_environment, training_environment_sha256 = _training_environment_identity(
+        device, amp=config.runtime.amp, deterministic=config.runtime.deterministic
+    )
+    if (
+        expected_v4_environment is not None
+        and training_environment_sha256 != expected_v4_environment
+    ):
+        raise RuntimeError(
+            "Protocol v4 current training environment differs from the health/pilot freeze"
+        )
     run_dir = Path(config.runtime.output_dir) / config.runtime.run_id
     existing_metrics = run_dir / "seed_metrics.json"
     if existing_metrics.exists() and not config.runtime.resume and not config.runtime.dry_run:
         raise FileExistsError(
             f"Run {config.runtime.run_id} already has terminal metrics; refusing to overwrite it"
         )
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if config.runtime.resume:
+        if not run_dir.is_dir():
+            raise RuntimeError("Resume run directory is missing")
+    else:
+        run_dir.mkdir(parents=True, exist_ok=True)
     logger = JSONLLogger(run_dir / "events.jsonl")
     metrics_row = _seed_metric_base(config, started_at)
-    training_environment, training_environment_sha256 = _training_environment_identity(
-        device, amp=config.runtime.amp, deterministic=config.runtime.deterministic
-    )
     metrics_row.update(
         {
             "training_environment_identity": training_environment,
@@ -681,13 +1137,17 @@ def run(
             run_dir,
             config.runtime.resume,
             training_environment_sha256,
+            expected_run_id=config.runtime.run_id,
+            expected_config_hash=config.config_hash,
         )
     model: torch.nn.Module | None = None
     optimizer: torch.optim.Optimizer | None = None
     scheduler: Any = None
     best_val: Dict[str, Any] = {"accuracy": -math.inf, "loss": math.inf, "epoch": -1}
     current_epoch = -1
-    atomic_write_json(run_dir / "resolved_config.json", config.as_dict())
+    resume_writes_authorized = not bool(config.runtime.resume)
+    if resume_writes_authorized:
+        atomic_write_json(run_dir / "resolved_config.json", config.as_dict())
     try:
         # Keep the independent test data outside the entire model-selection
         # loop.  It is constructed only after best.pt has been frozen.
@@ -717,6 +1177,7 @@ def run(
             "shared_weight_sha256": metrics_row["shared_weight_sha256"],
             "ta_parameter_names": ta_names,
             "ta_activation_epoch_zero_based": ta_activation_epoch,
+            "optimizer_group_manifest": optimizer_group_manifest(model, optimizer),
             "environment": {
                 **environment_manifest(),
                 "training_environment_identity": json.loads(training_environment),
@@ -737,15 +1198,6 @@ def run(
                     "training_environment_sha256": training_environment_sha256,
                 },
             ]
-        atomic_write_json(run_dir / "run_manifest.json", manifest)
-        logger.log(
-            "run_started", device=str(device), dry_run=config.runtime.dry_run,
-            config_hash=config.config_hash, parameter_report=report,
-            ta_activation_epoch_zero_based=ta_activation_epoch,
-            orchestrator_evidence=(
-                dict(orchestrator_evidence) if orchestrator_evidence is not None else None
-            ),
-        )
         start_epoch = 0
         train_history: List[Dict[str, Any]] = []
         if config.runtime.resume:
@@ -756,7 +1208,27 @@ def run(
                 scheduler,
                 config,
                 expected_training_environment_sha256=training_environment_sha256,
+                expected_run_manifest=previous_manifest,
             )
+            manifest["optimizer_group_manifest"] = optimizer_group_manifest(
+                model, optimizer
+            )
+            resume_writes_authorized = True
+            atomic_write_json(run_dir / "resolved_config.json", config.as_dict())
+        # Commit the new audit record only after every resume check and state
+        # load has succeeded.  A rejected resume leaves the previous manifest
+        # byte-for-byte intact.
+        atomic_write_json(run_dir / "run_manifest.json", manifest)
+        logger.log(
+            "run_started", device=str(device), dry_run=config.runtime.dry_run,
+            config_hash=config.config_hash, parameter_report=report,
+            optimizer_group_manifest=manifest["optimizer_group_manifest"],
+            ta_activation_epoch_zero_based=ta_activation_epoch,
+            orchestrator_evidence=(
+                dict(orchestrator_evidence) if orchestrator_evidence is not None else None
+            ),
+        )
+        if config.runtime.resume:
             logger.log("resumed", checkpoint=config.runtime.resume, start_epoch=start_epoch)
         # Resume must restore whether TA parameters are still frozen.
         _set_ta_enabled(
@@ -804,7 +1276,7 @@ def run(
                 )
             logger.log(
                 "epoch_completed", epoch=current_epoch, train=train_metrics, val=val_metrics,
-                learning_rates={str(group.get("role", index)): group["lr"] for index, group in enumerate(optimizer.param_groups)},
+                learning_rates=_optimizer_learning_rates(optimizer),
                 ta_enabled=ta_enabled, best_val=best_val,
             )
             scheduler.step()
@@ -847,7 +1319,15 @@ def run(
         metrics_row["finished_at"] = utc_now()
         metrics_row["duration_s"] = time.perf_counter() - started_clock
         atomic_write_json(run_dir / "seed_metrics.json", metrics_row)
-        manifest.update({"status": metrics_row["status"], "finished_at": metrics_row["finished_at"]})
+        manifest.update(
+            {
+                "status": metrics_row["status"],
+                "finished_at": metrics_row["finished_at"],
+                "optimizer_group_manifest": optimizer_group_manifest(
+                    model, optimizer
+                ),
+            }
+        )
         atomic_write_json(run_dir / "run_manifest.json", manifest)
         metrics_csv = Path(config.runtime.output_dir) / "seed_metrics.csv"
         if config.runtime.resume or config.runtime.dry_run:
@@ -857,6 +1337,8 @@ def run(
         logger.log("run_completed", metrics=metrics_row)
         return metrics_row
     except BaseException as exc:
+        if config.runtime.resume and not resume_writes_authorized:
+            raise
         metrics_row.update({
             "status": "failed",
             "failed": 1,
@@ -918,6 +1400,77 @@ def _override_config(config: RunConfig, args: argparse.Namespace) -> RunConfig:
     if args.output_dir is not None and not args.dry_run:
         runtime = dataclasses.replace(runtime, output_dir=args.output_dir)
     return dataclasses.replace(config, runtime=runtime, final_test=False)
+
+
+def _v4_formal_execution_evidence(
+    protocol: Mapping[str, Any],
+    freeze_manifest: Mapping[str, Any],
+    *,
+    protocol_path: str | Path,
+) -> dict[str, Any]:
+    """Extract the one pilot-bound environment authorized for v4 formal work."""
+
+    if int(protocol.get("protocol_version", 0)) != 4:
+        raise ValueError("V4 formal evidence requires protocol_version 4")
+    pilot = freeze_manifest.get("pilot_validation")
+    if not isinstance(pilot, Mapping):
+        raise ValueError("V4 freeze manifest has no pilot_validation binding")
+    expected_top = {
+        "status": "PASS",
+        "pass": True,
+        "protocol_hash": stable_hash(protocol),
+    }
+    mismatches = [
+        key for key, expected in expected_top.items() if pilot.get(key) != expected
+    ]
+    datasets = pilot.get("datasets")
+    if not isinstance(datasets, Mapping) or set(datasets) != {
+        "cifar100",
+        "cifar10dvs",
+    }:
+        mismatches.append("datasets")
+        datasets = {}
+    environment_hashes = {
+        str(evidence.get("environment_sha256", ""))
+        for evidence in datasets.values()
+        if isinstance(evidence, Mapping)
+    }
+    if (
+        len(environment_hashes) != 1
+        or len(next(iter(environment_hashes), "")) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in next(iter(environment_hashes), "")
+        )
+    ):
+        mismatches.append("single shared pilot training environment")
+    if mismatches:
+        raise ValueError(
+            "V4 formal execution evidence is incomplete or inconsistent: "
+            + ", ".join(mismatches)
+        )
+
+    validation_sha256 = str(pilot.get("sha256", ""))
+    if len(validation_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in validation_sha256
+    ):
+        raise ValueError("V4 pilot validation artifact hash is missing")
+    manifest_path = PROJECT_ROOT / artifact_paths_for_protocol(protocol)[
+        "freeze_manifest"
+    ]
+    if not manifest_path.is_file():
+        raise ValueError("V4 freeze manifest disappeared after verification")
+    return {
+        "protocol_version": 4,
+        "execution_stage": "formal",
+        "protocol": artifact_path_reference(protocol_path, PROJECT_ROOT),
+        "protocol_hash": stable_hash(protocol),
+        "pilot_validation": str(pilot.get("path", "")),
+        "pilot_validation_sha256": validation_sha256,
+        "freeze_manifest": artifact_path_reference(manifest_path, PROJECT_ROOT),
+        "freeze_manifest_sha256": sha256_file(manifest_path),
+        "training_environment_sha256": next(iter(environment_hashes)),
+    }
 
 
 def _validate_orchestrator_pilot_plan(
@@ -1190,10 +1743,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if pilot_active and args.dry_run:
         raise SystemExit("The orchestrator pilot plan cannot be used for a dry run")
     protocol = load_protocol(args.protocol)
-    if int(protocol.get("protocol_version", 1)) == 3 and args.dry_run:
+    protocol_version = int(protocol.get("protocol_version", 1))
+    if protocol_version in (3, 4) and args.dry_run:
         raise SystemExit(
-            "Protocol v3 training dry-runs are disabled; use generate_run_configs.py "
-            "--dry-run and reserve training commands for the author-frozen health/pilot gates"
+            f"Protocol v{protocol_version} training dry-runs are disabled; use "
+            "generate_run_configs.py --dry-run and reserve training commands for "
+            "the author-frozen health/pilot gates"
         )
     report = check_protocol(
         args.protocol,
@@ -1203,9 +1758,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not report.ok:
         raise SystemExit("Protocol preflight blocked training:\n" + "\n".join(f"- {e}" for e in report.errors))
+    formal_freeze: Mapping[str, Any] | None = None
     if not args.dry_run and not pilot_active:
         try:
-            verify_formal_freeze(
+            formal_freeze = verify_formal_freeze(
                 project_root=PROJECT_ROOT,
                 protocol_path=args.protocol,
                 matrix_dir=Path(args.config).resolve().parent,
@@ -1216,7 +1772,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config.analysis.get("protocol_hash") != report.protocol_hash:
         raise SystemExit("Run config protocol hash is stale; regenerate configs from the current protocol")
     if (
-        int(protocol.get("protocol_version", 1)) == 3
+        protocol_version in (3, 4)
         and not args.dry_run
         and not pilot_active
     ):
@@ -1225,7 +1781,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_output = PROJECT_ROOT / expected_output
         if Path(config.runtime.output_dir).resolve() != expected_output.resolve():
             raise SystemExit(
-                "Protocol v3 formal training must use its isolated output_root"
+                f"Protocol v{protocol_version} formal training must use its isolated output_root"
             )
     orchestrator_evidence: dict[str, Any] | None = None
     if args.orchestrator_pilot_plan is not None:
@@ -1240,6 +1796,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"Pilot plan validation failed: {exc}") from exc
+    elif protocol_version == 4 and not args.dry_run:
+        if formal_freeze is None:
+            raise SystemExit("Protocol v4 formal execution has no verified freeze manifest")
+        try:
+            orchestrator_evidence = _v4_formal_execution_evidence(
+                protocol,
+                formal_freeze,
+                protocol_path=args.protocol,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"V4 formal environment gate failed: {exc}") from exc
     try:
         result = run(config, orchestrator_evidence=orchestrator_evidence)
     except BaseException as exc:

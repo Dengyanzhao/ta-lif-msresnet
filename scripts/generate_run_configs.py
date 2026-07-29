@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -26,6 +29,7 @@ from talif_msresnet.config import (  # noqa: E402
     artifact_paths_for_protocol,
     generate_run_matrix,
     generate_v3_pilot_matrix,
+    generate_v4_pilot_matrix,
     load_protocol,
     validate_run_mapping,
 )
@@ -74,6 +78,119 @@ def _manifest_rows(runs: Sequence[RunConfig], output_dir: Path) -> list[dict[str
     return rows
 
 
+def _matrix_runs(
+    protocol: Mapping[str, Any],
+    *,
+    stage: str,
+) -> list[dict[str, Any]]:
+    if stage == "formal":
+        return generate_run_matrix(protocol)
+    version = int(protocol["protocol_version"])
+    if version == 3:
+        return generate_v3_pilot_matrix(protocol)
+    if version == 4:
+        return generate_v4_pilot_matrix(protocol)
+    raise ValueError(
+        "Pilot matrix generation through this mode requires protocol v3 or v4"
+    )
+
+
+def _expected_matrix_dir(
+    protocol: Mapping[str, Any],
+    *,
+    stage: str,
+) -> Path:
+    matrix_path_key = "pilot_matrix" if stage == "pilot" else "formal_matrix"
+    return (PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]).resolve()
+
+
+def _write_matrix_artifacts(
+    protocol_path: str | Path,
+    protocol: Mapping[str, Any],
+    runs: Sequence[Mapping[str, Any]],
+    resolved_runs: Sequence[RunConfig],
+    output_dir: Path,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expected_yaml_names = {f"{run['run_id']}.yaml" for run in runs}
+    for path in output_dir.glob("*.yaml"):
+        if path.name not in expected_yaml_names:
+            path.unlink()
+    for resolved in resolved_runs:
+        _write_yaml(output_dir / f"{resolved.runtime.run_id}.yaml", resolved.as_dict())
+    rows = _manifest_rows(resolved_runs, output_dir)
+    fields = list(rows[0])
+    manifest_csv = output_dir / "run_manifest.csv"
+    with manifest_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    atomic_write_json(output_dir / "matrix_manifest.json", {
+        "protocol": _protocol_reference(protocol_path),
+        "protocol_hash": stable_hash(protocol),
+        "run_count": len(runs),
+        "conditions": list(active_conditions_for_protocol(protocol)),
+        "seeds": list(dict.fromkeys(run.runtime.seed for run in resolved_runs)),
+        "matrix_hash": stable_hash(runs),
+        "runs": rows,
+    })
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _publish_staged_directory(staging_dir: Path, output_dir: Path) -> None:
+    backup_dir: Path | None = None
+    if output_dir.exists() or output_dir.is_symlink():
+        backup_dir = output_dir.with_name(
+            f".{output_dir.name}.backup-{uuid.uuid4().hex}"
+        )
+        output_dir.rename(backup_dir)
+    try:
+        staging_dir.rename(output_dir)
+    except BaseException:
+        if backup_dir is not None:
+            backup_dir.rename(output_dir)
+        raise
+    if backup_dir is not None:
+        _remove_path(backup_dir)
+
+
+def _generate_v4_transactionally(
+    protocol_path: str | Path,
+    protocol: Mapping[str, Any],
+    runs: Sequence[Mapping[str, Any]],
+    resolved_runs: Sequence[RunConfig],
+    output_dir: Path,
+) -> None:
+    if not output_dir.parent.is_dir():
+        raise ValueError(
+            f"The isolated v4 matrix parent directory does not exist: {output_dir.parent}"
+        )
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}.staging-",
+            dir=str(output_dir.parent),
+        )
+    )
+    try:
+        _write_matrix_artifacts(
+            protocol_path,
+            protocol,
+            runs,
+            resolved_runs,
+            staging_dir,
+        )
+        _publish_staged_directory(staging_dir, output_dir)
+    finally:
+        if staging_dir.exists() or staging_dir.is_symlink():
+            _remove_path(staging_dir)
+
+
 def generate(
     protocol_path: str | Path,
     output_dir: str | Path,
@@ -83,25 +200,38 @@ def generate(
     protocol = load_protocol(protocol_path)
     if stage not in {"formal", "pilot"}:
         raise ValueError("stage must be formal or pilot")
-    if stage == "pilot" and protocol["protocol_version"] != 3:
-        raise ValueError("Pilot matrix generation through this mode requires protocol v3")
-    runs = (
-        generate_v3_pilot_matrix(protocol)
-        if stage == "pilot"
-        else generate_run_matrix(protocol)
-    )
     output_dir = Path(output_dir)
+    if protocol["protocol_version"] == 4:
+        expected_output = _expected_matrix_dir(protocol, stage=stage)
+        if output_dir.resolve() != expected_output:
+            raise ValueError(
+                f"Protocol v4 {stage} generation must use its isolated matrix path: "
+                f"{expected_output}"
+            )
+    runs = _matrix_runs(protocol, stage=stage)
+    resolved_runs = [validate_run_mapping(run, protocol) for run in runs]
+    if protocol["protocol_version"] == 4:
+        expected_count = 4 if stage == "pilot" else 20
+        if len(resolved_runs) != expected_count:
+            raise ValueError(
+                f"Protocol v4 {stage} matrix must contain exactly {expected_count} runs"
+            )
+        _generate_v4_transactionally(
+            protocol_path,
+            protocol,
+            runs,
+            resolved_runs,
+            output_dir,
+        )
+        return runs
+
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_yaml_names = {f"{run['run_id']}.yaml" for run in runs}
     for path in output_dir.glob("*.yaml"):
         if path.name not in expected_yaml_names:
             path.unlink()
-    resolved_runs: list[RunConfig] = []
-    for run in runs:
-        # Validate before writing so a partially generated matrix cannot hide a typo.
-        resolved = validate_run_mapping(run, protocol)
-        _write_yaml(output_dir / f"{run['run_id']}.yaml", resolved.as_dict())
-        resolved_runs.append(resolved)
+    for resolved in resolved_runs:
+        _write_yaml(output_dir / f"{resolved.runtime.run_id}.yaml", resolved.as_dict())
     rows = _manifest_rows(resolved_runs, output_dir)
     fields = list(rows[0])
     manifest_csv = output_dir / "run_manifest.csv"
@@ -128,14 +258,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         help=(
             "Generated matrix directory. Defaults to configs/generated for legacy "
-            "protocols and to artifact_paths.formal_matrix for protocol v3."
+            "protocols and to the isolated artifact_paths matrix for protocols v3/v4."
         ),
     )
     parser.add_argument(
         "--stage",
         choices=("formal", "pilot"),
         default="formal",
-        help="Generate the formal matrix or the protocol-v3 non-reportable pilot matrix",
+        help="Generate the formal matrix or a protocol-v3/v4 non-reportable pilot matrix",
     )
     parser.add_argument(
         "--dry-run",
@@ -152,26 +282,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output is None:
         output = (
             PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
-            if protocol["protocol_version"] == 3
+            if protocol["protocol_version"] in (3, 4)
             else PROJECT_ROOT / "configs" / "generated"
         )
     else:
         output = Path(args.output)
-    if protocol["protocol_version"] == 3:
+    if protocol["protocol_version"] in (3, 4):
         expected_output = (
             PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
         ).resolve()
         if output.resolve() != expected_output:
             raise SystemExit(
-                f"Protocol v3 {args.stage} generation must use its isolated matrix path: "
+                f"Protocol v{protocol['protocol_version']} {args.stage} generation "
+                "must use its isolated matrix path: "
                 f"{expected_output}"
             )
     if args.dry_run:
-        runs = (
-            generate_v3_pilot_matrix(protocol)
-            if args.stage == "pilot"
-            else generate_run_matrix(protocol)
-        )
+        runs = _matrix_runs(protocol, stage=args.stage)
         for run in runs:
             validate_run_mapping(run, protocol)
         print(f"Validated {len(runs)} unique configurations; no files written")
