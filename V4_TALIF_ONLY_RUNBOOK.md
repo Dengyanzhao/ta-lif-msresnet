@@ -40,10 +40,22 @@ the verified cloud virtual environment first.
 ```bash
 PYTHON=python
 PROTOCOL="configs/protocol_v4_talif_only.yaml"
+PILOT_MATRIX="configs/v4_talif_only_pilot_generated"
 PHASE_A_COMMIT="$(git rev-parse HEAD)"
 
 git status --short --untracked-files=no
 git rev-parse HEAD
+"$PYTHON" -m pip install --no-deps -e .
+"$PYTHON" - <<'PY'
+from pathlib import Path
+import talif_msresnet.config as config
+
+observed = Path(config.__file__).resolve()
+expected = Path.cwd().resolve() / "src" / "talif_msresnet" / "config.py"
+print(observed)
+if observed != expected:
+    raise SystemExit(f"reviewed checkout is shadowed: expected {expected}, got {observed}")
+PY
 "$PYTHON" scripts/preflight.py --protocol "$PROTOCOL" --mode pilot
 ```
 
@@ -51,6 +63,7 @@ Required before continuing:
 
 - `git status --short --untracked-files=no` prints nothing.
 - `HEAD` is the reviewed v4 Phase A source commit.
+- The imported `talif_msresnet.config` is the file under this checkout's `src` directory.
 - Pilot preflight prints `PASS`.
 - `nvidia-smi` identifies an RTX 5090.
 - The Python environment reports PyTorch `2.9.1+cu128` and CUDA `12.8`.
@@ -73,7 +86,8 @@ The next command claims seed `1975342236` before compute. Run it once only.
 
 ```bash
 "$PYTHON" scripts/pilot_health_gate_v4.py \
-  --protocol "$PROTOCOL" --dataset cifar100 --device cuda:0
+  --protocol "$PROTOCOL" --config-dir "$PILOT_MATRIX" \
+  --dataset cifar100 --device cuda:0
 ```
 
 Continue only if it prints `V4_HEALTH_GATE_PASS dataset=cifar100`. Then launch the
@@ -94,7 +108,8 @@ The next command claims seed `1983855948` before compute. Run it once only.
 
 ```bash
 "$PYTHON" scripts/pilot_health_gate_v4.py \
-  --protocol "$PROTOCOL" --dataset cifar10dvs --device cuda:0
+  --protocol "$PROTOCOL" --config-dir "$PILOT_MATRIX" \
+  --dataset cifar10dvs --device cuda:0
 ```
 
 Continue only if it prints `V4_HEALTH_GATE_PASS dataset=cifar10dvs`. Then run:

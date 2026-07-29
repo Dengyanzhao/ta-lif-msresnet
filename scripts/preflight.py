@@ -11,8 +11,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+SRC_PATH = str(SRC_ROOT)
+if SRC_PATH in sys.path:
+    sys.path.remove(SRC_PATH)
+sys.path.insert(0, SRC_PATH)
 
 from talif_msresnet.preflight import check_protocol  # noqa: E402
 

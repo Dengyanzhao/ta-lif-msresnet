@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +31,42 @@ def _load_freeze_tool():
 
 
 tool = _load_freeze_tool()
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    (
+        "preflight.py",
+        "generate_run_configs.py",
+        "pilot_health_gate_v4.py",
+        "run_matrix.py",
+        "validate_v4_pilot.py",
+        "create_freeze_manifest.py",
+        "evaluate_checkpoints.py",
+        "analyze_v4_results.py",
+    ),
+)
+def test_v4_entrypoint_prefers_reviewed_checkout_over_stale_package(
+    tmp_path: Path, script_name: str
+) -> None:
+    stale_root = tmp_path / "stale"
+    stale_package = stale_root / "talif_msresnet"
+    stale_package.mkdir(parents=True)
+    (stale_package / "__init__.py").write_text("", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(stale_root), str(ROOT / "src")))
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / script_name), "--help"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _v4_protocol() -> dict[str, Any]:
