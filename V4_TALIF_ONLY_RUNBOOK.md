@@ -28,17 +28,17 @@ hide a zero-coverage deep layer.
 
 ## 1. Phase A source state
 
-Run from the repository root in PowerShell. Use the repository virtual
-environment, not the Windows Store Python.
+Run from the repository root in Bash on the RTX 5090 Ubuntu instance. Activate
+the verified cloud virtual environment first.
 
-```powershell
-$python = ".\.venv\Scripts\python.exe"
-$protocol = "configs/protocol_v4_talif_only.yaml"
-$phaseACommit = (git rev-parse HEAD).Trim()
+```bash
+PYTHON=python
+PROTOCOL="configs/protocol_v4_talif_only.yaml"
+PHASE_A_COMMIT="$(git rev-parse HEAD)"
 
 git status --short --untracked-files=no
 git rev-parse HEAD
-& $python scripts/preflight.py --protocol $protocol --mode pilot
+"$PYTHON" scripts/preflight.py --protocol "$PROTOCOL" --mode pilot
 ```
 
 Required before continuing:
@@ -51,9 +51,9 @@ Required before continuing:
 
 Generate the two isolated matrices only if they are absent in this checkout:
 
-```powershell
-& $python scripts/generate_run_configs.py --protocol $protocol --stage pilot
-& $python scripts/generate_run_configs.py --protocol $protocol --stage formal
+```bash
+"$PYTHON" scripts/generate_run_configs.py --protocol "$PROTOCOL" --stage pilot
+"$PYTHON" scripts/generate_run_configs.py --protocol "$PROTOCOL" --stage formal
 ```
 
 Expected output is exactly four files plus two manifests in
@@ -65,17 +65,17 @@ destination instead of overwriting it.
 
 The next command claims seed `1975342236` before compute. Run it once only.
 
-```powershell
-& $python scripts/pilot_health_gate_v4.py `
-  --protocol $protocol --dataset cifar100 --device cuda:0
+```bash
+"$PYTHON" scripts/pilot_health_gate_v4.py \
+  --protocol "$PROTOCOL" --dataset cifar100 --device cuda:0
 ```
 
 Continue only if it prints `V4_HEALTH_PASS dataset=cifar100`. Then launch the
 complete ordered C1/C2 block:
 
-```powershell
-& $python scripts/run_matrix.py `
-  --protocol $protocol --allow-unfrozen-pilot --dataset cifar100 `
+```bash
+"$PYTHON" scripts/run_matrix.py \
+  --protocol "$PROTOCOL" --allow-unfrozen-pilot --dataset cifar100 \
   --device cuda:0 --stop-on-error
 ```
 
@@ -86,16 +86,16 @@ Do not add `--condition`, `--limit`, `--experiment`, `--output-root`,
 
 The next command claims seed `1983855948` before compute. Run it once only.
 
-```powershell
-& $python scripts/pilot_health_gate_v4.py `
-  --protocol $protocol --dataset cifar10dvs --device cuda:0
+```bash
+"$PYTHON" scripts/pilot_health_gate_v4.py \
+  --protocol "$PROTOCOL" --dataset cifar10dvs --device cuda:0
 ```
 
 Continue only if it prints `V4_HEALTH_PASS dataset=cifar10dvs`. Then run:
 
-```powershell
-& $python scripts/run_matrix.py `
-  --protocol $protocol --allow-unfrozen-pilot --dataset cifar10dvs `
+```bash
+"$PYTHON" scripts/run_matrix.py \
+  --protocol "$PROTOCOL" --allow-unfrozen-pilot --dataset cifar10dvs \
   --device cuda:0 --stop-on-error
 ```
 
@@ -103,9 +103,9 @@ Continue only if it prints `V4_HEALTH_PASS dataset=cifar10dvs`. Then run:
 
 Run this only after both two-run blocks complete:
 
-```powershell
-& $python scripts/validate_v4_pilot.py `
-  --protocol $protocol `
+```bash
+"$PYTHON" scripts/validate_v4_pilot.py \
+  --protocol "$PROTOCOL" \
   --config-dir configs/v4_talif_only_pilot_generated
 ```
 
@@ -119,26 +119,26 @@ Create the manifest only after aggregate PASS. The command re-runs the pilot
 validator and binds the protocol, author record, Phase A commit, formal matrix,
 health/pilot evidence, and all v4 gate and analysis source hashes.
 
-```powershell
-$phaseACommit = (git rev-parse HEAD).Trim()
+```bash
+PHASE_A_COMMIT="$(git rev-parse HEAD)"
 
-& $python scripts/create_freeze_manifest.py `
-  --project-root . `
-  --protocol $protocol `
-  --signoff PREREGISTRATION_SIGNOFF_V4_TALIF_ONLY.md `
-  --matrix-dir configs/v4_talif_only_generated `
-  --output FREEZE_MANIFEST_V4_TALIF_ONLY.json `
-  --freeze-commit $phaseACommit
+"$PYTHON" scripts/create_freeze_manifest.py \
+  --project-root . \
+  --protocol "$PROTOCOL" \
+  --signoff PREREGISTRATION_SIGNOFF_V4_TALIF_ONLY.md \
+  --matrix-dir configs/v4_talif_only_generated \
+  --output FREEZE_MANIFEST_V4_TALIF_ONLY.json \
+  --freeze-commit "$PHASE_A_COMMIT"
 
-& $python scripts/create_freeze_manifest.py `
-  --project-root . `
-  --protocol $protocol `
-  --signoff PREREGISTRATION_SIGNOFF_V4_TALIF_ONLY.md `
-  --matrix-dir configs/v4_talif_only_generated `
-  --output FREEZE_MANIFEST_V4_TALIF_ONLY.json `
+"$PYTHON" scripts/create_freeze_manifest.py \
+  --project-root . \
+  --protocol "$PROTOCOL" \
+  --signoff PREREGISTRATION_SIGNOFF_V4_TALIF_ONLY.md \
+  --matrix-dir configs/v4_talif_only_generated \
+  --output FREEZE_MANIFEST_V4_TALIF_ONLY.json \
   --verify
 
-& $python scripts/preflight.py --protocol $protocol --mode full
+"$PYTHON" scripts/preflight.py --protocol "$PROTOCOL" --mode full
 ```
 
 Formal training is authorized only when manifest verification and full
@@ -146,9 +146,9 @@ preflight both pass.
 
 ## 6. Formal twenty-run matrix
 
-```powershell
-& $python scripts/run_matrix.py `
-  --protocol $protocol --device cuda:0 --stop-on-error
+```bash
+"$PYTHON" scripts/run_matrix.py \
+  --protocol "$PROTOCOL" --device cuda:0 --stop-on-error
 ```
 
 No dataset, condition, experiment, run-count, batch-count, config, output-root,
@@ -158,9 +158,9 @@ protocol-bound formal matrix and output root.
 For a technical interruption, resume on the same machine and software
 environment only when that run has a valid `last.pt`:
 
-```powershell
-& $python scripts/run_matrix.py `
-  --protocol $protocol --device cuda:0 --stop-on-error --resume-matrix
+```bash
+"$PYTHON" scripts/run_matrix.py \
+  --protocol "$PROTOCOL" --device cuda:0 --stop-on-error --resume-matrix
 ```
 
 Never start a fresh retry under a consumed run identity, substitute a seed, or
@@ -170,16 +170,16 @@ resume a checkpoint in a different environment.
 
 Only after all twenty training runs and best-checkpoint audits are complete:
 
-```powershell
-& $python scripts/preflight.py --protocol $protocol --mode final-test
+```bash
+"$PYTHON" scripts/preflight.py --protocol "$PROTOCOL" --mode final-test
 
-& $python scripts/evaluate_checkpoints.py `
-  --protocol $protocol `
-  --results-root results/formal_v4_talif_only `
-  --config-dir configs/v4_talif_only_generated `
+"$PYTHON" scripts/evaluate_checkpoints.py \
+  --protocol "$PROTOCOL" \
+  --results-root results/formal_v4_talif_only \
+  --config-dir configs/v4_talif_only_generated \
   --device cuda:0
 
-& $python scripts/analyze_v4_results.py --protocol $protocol
+"$PYTHON" scripts/analyze_v4_results.py --protocol "$PROTOCOL"
 ```
 
 The evaluator permits one committed test transaction per checkpoint. If a
