@@ -1,0 +1,30 @@
+{
+  "allowed_changed_paths": [
+    "V5_TALIF_ONLY_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/validate_v3_pilot.py",
+    "scripts/validate_v5_pilot.py",
+    "src/talif_msresnet/freeze.py",
+    "tests/test_v5_execution_gates.py",
+    "tests/test_v5_release_flow.py",
+    "tests/test_validate_v5_pilot.py"
+  ],
+  "base_pilot_commit": "6eeadd6389677347fe46ffa8d3bdec8c75455b44",
+  "implementation_commit": "416eb5a316f84da70d54ecfb63a807ad6151de4e",
+  "implementation_file_sha256": {
+    "V5_TALIF_ONLY_RUNBOOK.md": "f0175398c637e82792dadf2c60f4de458d2f076381180e776094ebfa90f4d504",
+    "scripts/create_freeze_manifest.py": "bec0a6c4615946408d7e1027cb1b12384526939159dbbf7f8695cad2aa1f2426",
+    "scripts/validate_v3_pilot.py": "259b30fa96f4aff8539e9f0d2d093317e3abdee3d8fb5b11c15c2a2ed9de9f90",
+    "scripts/validate_v5_pilot.py": "e8d3beae10c107565853afb2b4b0c567698628ba291aa2f8a3a27c1dcbd814b4",
+    "src/talif_msresnet/freeze.py": "f27b72330de0a38065907bf11d63b47520d83d93e40fcf621c8149d90835d41a",
+    "tests/test_v5_execution_gates.py": "b5c49dc0cf9170f4f9ce33192b8cb7eb6f40e3588dcaa5448921e327730da41d",
+    "tests/test_v5_release_flow.py": "2feeb5d6122e862e88c803a3d1296bbb0750013e5d816fb8077f0589704336f2",
+    "tests/test_validate_v5_pilot.py": "536132d01624b40b772f0ba8633fd91672d70632eb2f6258d54656539d8498eb"
+  },
+  "implementation_tree": "9f222e4c732db90f1e4e6325764e565d21d8fd86",
+  "original_validation_sha256": "5cc85680923b6eee1e454dcf4cf7667f4271dc531d5837a529e57bfcaccd7e86",
+  "protocol_hash": "a5b2a664de5142438061f479a37f3b55401499104abb28ee3cf1d674ec1d4527",
+  "record_sha256": "45e9a2ebe6e023641ad0861073d8bac53fbd1f957a331dc6e55402b2ee31e5c6",
+  "schema": "ta-lif-msresnet-v5-validation-recovery-release-v1",
+  "training_environment_sha256": "f3b837c1554615bb97af91183ec450bf8f4bb43610ad47123aa1f161791d4fb6"
+}
