@@ -399,6 +399,8 @@ def _checkpoint_failures(
     expected_config_hash: str,
     expected_environment_hash: str,
     protocol: Mapping[str, Any],
+    expected_output_dir: str | None = None,
+    actual_output_root: Path | None = None,
 ) -> list[str]:
     try:
         checkpoint = load_checkpoint(path, map_location="cpu")
@@ -434,14 +436,53 @@ def _checkpoint_failures(
         history, list(expected_history)
     ):
         failures.append(f"{label} train_history differs from epoch evidence")
+    embedded_raw = checkpoint.get("config")
+    if expected_output_dir is not None and actual_output_root is not None:
+        embedded_raw = _canonicalize_execution_output_dir(
+            embedded_raw,
+            expected_output_dir=expected_output_dir,
+            actual_output_root=actual_output_root,
+        )
     try:
-        embedded = validate_run_mapping(checkpoint.get("config"), protocol)
+        embedded = validate_run_mapping(embedded_raw, protocol)
     except (TypeError, ValueError) as exc:
         failures.append(f"{label} embedded config is invalid: {exc}")
     else:
         if embedded.config_hash != expected_config_hash:
             failures.append(f"{label} embedded scientific config mismatch")
     return failures
+
+
+def _canonicalize_execution_output_dir(
+    raw: Any,
+    *,
+    expected_output_dir: str,
+    actual_output_root: Path,
+) -> Any:
+    """Normalize only an absolute spelling of the already-bound output root."""
+
+    if not isinstance(raw, Mapping):
+        return raw
+    runtime = raw.get("runtime")
+    if not isinstance(runtime, Mapping):
+        return raw
+    observed_value = runtime.get("output_dir")
+    if observed_value == expected_output_dir or not isinstance(observed_value, str):
+        return raw
+    observed = Path(observed_value)
+    if not observed.is_absolute():
+        return raw
+    try:
+        equivalent = observed.resolve() == actual_output_root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        equivalent = False
+    if not equivalent:
+        return raw
+    normalized = dict(raw)
+    normalized_runtime = dict(runtime)
+    normalized_runtime["output_dir"] = expected_output_dir
+    normalized["runtime"] = normalized_runtime
+    return normalized
 
 
 def _load_generated_matrix(
@@ -646,6 +687,7 @@ def _validate_run(
     epochs: int,
     accuracy_threshold: float,
     maximum_ratio: float,
+    allow_equivalent_absolute_output_dir: bool = False,
 ) -> tuple[dict[str, Any], str | None, str | None, str | None]:
     condition = expected_config.model.condition
     run_id = expected_config.runtime.run_id
@@ -685,6 +727,12 @@ def _validate_run(
         resolved_raw = _read_json(
             run_dir / "resolved_config.json", "resolved configuration"
         )
+        if allow_equivalent_absolute_output_dir:
+            resolved_raw = _canonicalize_execution_output_dir(
+                resolved_raw,
+                expected_output_dir=expected_config.runtime.output_dir,
+                actual_output_root=block.pilot_output_root,
+            )
         resolved = validate_run_mapping(resolved_raw, protocol)
         events = _read_events(run_dir / "events.jsonl")
     except (ValueError, PilotValidationError) as exc:
@@ -859,6 +907,16 @@ def _validate_run(
                 expected_config_hash=expected_config_hash,
                 expected_environment_hash=environment_hash,
                 protocol=protocol,
+                expected_output_dir=(
+                    expected_config.runtime.output_dir
+                    if allow_equivalent_absolute_output_dir
+                    else None
+                ),
+                actual_output_root=(
+                    block.pilot_output_root
+                    if allow_equivalent_absolute_output_dir
+                    else None
+                ),
             )
         )
         integrity.extend(
@@ -871,6 +929,16 @@ def _validate_run(
                 expected_config_hash=expected_config_hash,
                 expected_environment_hash=environment_hash,
                 protocol=protocol,
+                expected_output_dir=(
+                    expected_config.runtime.output_dir
+                    if allow_equivalent_absolute_output_dir
+                    else None
+                ),
+                actual_output_root=(
+                    block.pilot_output_root
+                    if allow_equivalent_absolute_output_dir
+                    else None
+                ),
             )
         )
         if best_accuracy < accuracy_threshold:

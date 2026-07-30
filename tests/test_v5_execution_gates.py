@@ -123,6 +123,134 @@ def test_v5_formal_evidence_binds_one_shared_pilot_environment(
     assert evidence["training_environment_sha256"] == environment_sha256
 
 
+def test_runtime_v5_gate_rejects_malformed_recovery_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_path = tmp_path / "configs" / "protocol.yaml"
+    protocol_path.parent.mkdir(parents=True)
+    protocol_path.write_text("protocol_version: 5\n", encoding="utf-8")
+    matrix_dir = tmp_path / "configs" / "matrix"
+    matrix_dir.mkdir()
+    environment = "e" * 64
+    stored = {
+        "repository": {"freeze_commit": "7" * 40},
+        "protocol": {"path": "configs/protocol.yaml", "canonical_sha256": "a" * 64},
+        "generated_matrix": {"directory": "configs/matrix"},
+        "pilot_validation": {
+            "artifact_class": "NON_REPORTABLE_V5_TALIF_ONLY_PILOT_ACCEPTANCE",
+            "status": "PASS",
+            "pass": True,
+            "protocol_hash": "a" * 64,
+            "training_environment_sha256": environment,
+            "datasets": {
+                dataset: {
+                    "status": "PASS",
+                    "pass": True,
+                    "environment_sha256": environment,
+                }
+                for dataset in ("cifar100", "cifar10dvs")
+            },
+            "validator": {
+                "path": "scripts/validate_v5_pilot.py",
+                "sha256": "b" * 64,
+            },
+            "recovery": {"artifact_class": "wrong"},
+        },
+        "gate_sources": {
+            path: {
+                "path": path,
+                "file_sha256": "b" * 64
+                if path == "scripts/validate_v5_pilot.py"
+                else "c" * 64,
+            }
+            for path in freeze_module.V5_GATE_SOURCE_PATHS
+        },
+    }
+    monkeypatch.setattr(freeze_module, "load_protocol", lambda _path: {"protocol_version": 5})
+    monkeypatch.setattr(
+        freeze_module,
+        "_load_manifest_tool",
+        lambda _root: SimpleNamespace(verify_manifest=lambda **_kwargs: stored),
+    )
+
+    with pytest.raises(FreezeGateError, match="malformed pilot recovery binding"):
+        freeze_module.verify_formal_freeze(
+            project_root=tmp_path,
+            protocol_path=protocol_path,
+            matrix_dir=matrix_dir,
+            manifest_path=tmp_path / "freeze.json",
+        )
+
+
+def test_runtime_v5_gate_accepts_exact_incident_recovery_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_path = tmp_path / "configs" / "protocol.yaml"
+    protocol_path.parent.mkdir(parents=True)
+    protocol_path.write_text("protocol_version: 5\n", encoding="utf-8")
+    matrix_dir = tmp_path / "configs" / "matrix"
+    matrix_dir.mkdir()
+    environment = "e" * 64
+    validator_path = "scripts/validate_v5_pilot.py"
+    stored = {
+        "repository": {"freeze_commit": "7" * 40},
+        "protocol": {"path": "configs/protocol.yaml", "canonical_sha256": "a" * 64},
+        "generated_matrix": {"directory": "configs/matrix"},
+        "pilot_validation": {
+            "artifact_class": "NON_REPORTABLE_V5_TALIF_ONLY_PILOT_ACCEPTANCE",
+            "status": "PASS",
+            "pass": True,
+            "protocol_hash": "a" * 64,
+            "training_environment_sha256": environment,
+            "datasets": {
+                dataset: {
+                    "status": "PASS",
+                    "pass": True,
+                    "environment_sha256": environment,
+                }
+                for dataset in ("cifar100", "cifar10dvs")
+            },
+            "validator": {"path": validator_path, "sha256": "b" * 64},
+            "recovery": {
+                "artifact_class": "NON_REPORTABLE_V5_PILOT_VALIDATION_RECOVERY",
+                "sha256": "d" * 64,
+                "pilot_execution_commit": (
+                    "6eeadd6389677347fe46ffa8d3bdec8c75455b44"
+                ),
+                "recovery_validator_commit": "7" * 40,
+                "original_validation": {
+                    "status": "INVALID",
+                    "sha256": (
+                        "5cc85680923b6eee1e454dcf4cf7667f4271dc531d5837a529e57bfcaccd7e86"
+                    ),
+                },
+            },
+        },
+        "gate_sources": {
+            path: {
+                "path": path,
+                "file_sha256": "b" * 64 if path == validator_path else "c" * 64,
+            }
+            for path in freeze_module.V5_GATE_SOURCE_PATHS
+        },
+    }
+    monkeypatch.setattr(freeze_module, "load_protocol", lambda _path: {"protocol_version": 5})
+    monkeypatch.setattr(
+        freeze_module,
+        "_load_manifest_tool",
+        lambda _root: SimpleNamespace(verify_manifest=lambda **_kwargs: stored),
+    )
+
+    assert freeze_module.verify_formal_freeze(
+        project_root=tmp_path,
+        protocol_path=protocol_path,
+        matrix_dir=matrix_dir,
+        manifest_path=tmp_path / "freeze.json",
+    ) is stored
+
+
 def test_v5_matrix_launch_requires_c1_c2_with_pilot_seed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

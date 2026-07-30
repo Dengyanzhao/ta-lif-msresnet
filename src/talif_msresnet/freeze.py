@@ -186,6 +186,31 @@ def verify_formal_freeze(
                         "Protocol v5 freeze manifest has an inconsistent aggregate "
                         f"pilot/environment binding for {dataset}"
                     )
+            recovery = pilot_record.get("recovery")
+            if recovery is not None:
+                original = recovery.get("original_validation") if isinstance(
+                    recovery, Mapping
+                ) else None
+                repository = stored.get("repository")
+                if (
+                    not isinstance(recovery, Mapping)
+                    or recovery.get("artifact_class")
+                    != "NON_REPORTABLE_V5_PILOT_VALIDATION_RECOVERY"
+                    or not _is_sha256(recovery.get("sha256"))
+                    or recovery.get("pilot_execution_commit")
+                    != "6eeadd6389677347fe46ffa8d3bdec8c75455b44"
+                    or not isinstance(repository, Mapping)
+                    or recovery.get("recovery_validator_commit")
+                    != repository.get("freeze_commit")
+                    or not isinstance(original, Mapping)
+                    or original.get("status") != "INVALID"
+                    or not _is_sha256(original.get("sha256"))
+                    or original.get("sha256")
+                    != "5cc85680923b6eee1e454dcf4cf7667f4271dc531d5837a529e57bfcaccd7e86"
+                ):
+                    raise FreezeGateError(
+                        "Protocol v5 freeze manifest has a malformed pilot recovery binding"
+                    )
         if not isinstance(gate_sources, Mapping) or set(gate_sources) != required_sources:
             raise FreezeGateError(
                 f"Protocol v{version} freeze manifest does not bind the complete "

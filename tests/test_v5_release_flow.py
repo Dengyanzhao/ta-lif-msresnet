@@ -89,6 +89,15 @@ def _write_fake_v5_validator(project: Path, report: dict[str, Any]) -> Path:
     return path
 
 
+def _append_fake_recovery_release_validator(path: Path, release: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(
+            "\nRELEASE = "
+            + repr(release)
+            + "\n\ndef _recovery_release_binding(_root):\n    return RELEASE\n"
+        )
+
+
 def test_v5_artifact_paths_are_distinct_from_v3_v4_and_legacy() -> None:
     values = set(V5_ARTIFACT_PATHS.values())
 
@@ -142,6 +151,176 @@ def test_v5_freeze_rejects_cross_dataset_environment_mismatch(tmp_path: Path) ->
         freeze_tool.FreezeManifestError,
         match="dataset training environment bindings",
     ):
+        freeze_tool._validate_v5_pilot_acceptance(protocol, protocol_path, tmp_path)
+
+
+def test_v5_freeze_accepts_append_only_recovery_and_binds_both_decisions(
+    tmp_path: Path,
+) -> None:
+    protocol = _v5_protocol()
+    protocol_path = tmp_path / V5_ARTIFACT_PATHS["protocol"]
+    protocol_path.parent.mkdir(parents=True)
+    protocol_path.write_text("protocol_version: 5\n", encoding="utf-8")
+    report = _v5_pass_report(protocol)
+    report["protocol_hash"] = freeze_tool.V5_RECOVERY_PROTOCOL_HASH
+    report["training_environment_sha256"] = (
+        freeze_tool.V5_RECOVERY_TRAINING_ENVIRONMENT_SHA256
+    )
+    for evidence in report["datasets"].values():
+        evidence["environment_sha256"] = (
+            freeze_tool.V5_RECOVERY_TRAINING_ENVIRONMENT_SHA256
+        )
+    validation_path = tmp_path / protocol["pilot_acceptance"]["validation_output"]
+    validation_path.parent.mkdir(parents=True)
+    invalid = copy.deepcopy(report)
+    invalid.update(
+        {
+            "status": "INVALID",
+            "pass": False,
+            "decision": "BLOCK_V5_AND_INVESTIGATE_PILOT_EVIDENCE_INTEGRITY",
+            "exit_code": 2,
+            "training_environment_sha256": None,
+            "integrity_failures": ["path spelling"],
+        }
+    )
+    validation_path.write_text(
+        freeze_tool.canonical_json(invalid) + "\n", encoding="utf-8", newline="\n"
+    )
+    validator_path = _write_fake_v5_validator(tmp_path, report)
+    recovery_path = validation_path.with_name(freeze_tool.V5_RECOVERY_OUTPUT_NAME)
+    recovery = {
+        "schema_version": 1,
+        "artifact_class": "NON_REPORTABLE_V5_PILOT_VALIDATION_RECOVERY",
+        "status": "PASS",
+        "pass": True,
+        "decision": "RECOVER_V5_PILOT_PASS_AFTER_VALIDATOR_PATH_EQUIVALENCE_FIX",
+        "exit_code": 0,
+        "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
+        "confirmatory_analysis_eligibility": False,
+        "protocol_hash": freeze_tool.V5_RECOVERY_PROTOCOL_HASH,
+        "acceptance_hash": report["acceptance_hash"],
+        "pilot_execution_commit": freeze_tool.V5_RECOVERY_PILOT_EXECUTION_COMMIT,
+        "recovery_validator_commit": "7" * 40,
+        "release_delta": {
+            "base_commit": freeze_tool.V5_RECOVERY_PILOT_EXECUTION_COMMIT,
+            "implementation_commit": "8" * 40,
+            "implementation_tree": "9" * 40,
+            "recovery_commit": "7" * 40,
+            "allowed_changed_paths": list(
+                freeze_tool.V5_RECOVERY_ALLOWED_CHANGED_PATHS
+            ),
+            "observed_changes": [
+                f"M\t{path}"
+                for path in freeze_tool.V5_RECOVERY_ALLOWED_CHANGED_PATHS
+            ],
+            "release_record": freeze_tool.V5_RECOVERY_RELEASE_RECORD,
+            "release_record_sha256": "c" * 64,
+            "tracked_clean": True,
+        },
+        "recovery_validator": {
+            "path": validator_path.relative_to(tmp_path).as_posix(),
+            "sha256": freeze_tool._sha256_file(validator_path),
+        },
+        "original_validation": {
+            "path": validation_path.relative_to(tmp_path).as_posix(),
+            "sha256": freeze_tool.V5_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+            "status": "INVALID",
+        },
+        "recovered_validation": report,
+        "output": recovery_path.relative_to(tmp_path).as_posix(),
+    }
+    _append_fake_recovery_release_validator(validator_path, recovery["release_delta"])
+    recovery["recovery_validator"]["sha256"] = freeze_tool._sha256_file(
+        validator_path
+    )
+    recovery_path.write_text(
+        freeze_tool.canonical_json(recovery) + "\n", encoding="utf-8", newline="\n"
+    )
+
+    original_sha = freeze_tool._sha256_file
+    freeze_tool._sha256_file = lambda path: (
+        freeze_tool.V5_RECOVERY_ORIGINAL_VALIDATION_SHA256
+        if Path(path) == validation_path
+        else original_sha(Path(path))
+    )
+
+    try:
+        bound = freeze_tool._validate_v5_pilot_acceptance(
+            protocol, protocol_path, tmp_path
+        )
+    finally:
+        freeze_tool._sha256_file = original_sha
+
+    assert bound["status"] == "PASS"
+    assert bound["path"] == recovery_path.relative_to(tmp_path).as_posix()
+    assert bound["sha256"] == freeze_tool._sha256_file(recovery_path)
+    assert bound["recovery"]["original_validation"]["sha256"] == (
+        freeze_tool.V5_RECOVERY_ORIGINAL_VALIDATION_SHA256
+    )
+
+
+def test_v5_freeze_rejects_recovery_with_stale_invalid_hash(tmp_path: Path) -> None:
+    protocol = _v5_protocol()
+    protocol_path = tmp_path / V5_ARTIFACT_PATHS["protocol"]
+    protocol_path.parent.mkdir(parents=True)
+    protocol_path.write_text("protocol_version: 5\n", encoding="utf-8")
+    report = _v5_pass_report(protocol)
+    validation_path = tmp_path / protocol["pilot_acceptance"]["validation_output"]
+    validation_path.parent.mkdir(parents=True)
+    validation_path.write_text('{"status":"INVALID","pass":false}\n', encoding="utf-8")
+    validator_path = _write_fake_v5_validator(tmp_path, report)
+    recovery = {
+        "schema_version": 1,
+        "artifact_class": "NON_REPORTABLE_V5_PILOT_VALIDATION_RECOVERY",
+        "status": "PASS",
+        "pass": True,
+        "decision": "RECOVER_V5_PILOT_PASS_AFTER_VALIDATOR_PATH_EQUIVALENCE_FIX",
+        "exit_code": 0,
+        "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
+        "confirmatory_analysis_eligibility": False,
+        "protocol_hash": freeze_tool.V5_RECOVERY_PROTOCOL_HASH,
+        "acceptance_hash": report["acceptance_hash"],
+        "pilot_execution_commit": freeze_tool.V5_RECOVERY_PILOT_EXECUTION_COMMIT,
+        "recovery_validator_commit": "7" * 40,
+        "release_delta": {
+            "base_commit": freeze_tool.V5_RECOVERY_PILOT_EXECUTION_COMMIT,
+            "implementation_commit": "8" * 40,
+            "implementation_tree": "9" * 40,
+            "recovery_commit": "7" * 40,
+            "allowed_changed_paths": list(
+                freeze_tool.V5_RECOVERY_ALLOWED_CHANGED_PATHS
+            ),
+            "observed_changes": [
+                f"M\t{path}"
+                for path in freeze_tool.V5_RECOVERY_ALLOWED_CHANGED_PATHS
+            ],
+            "release_record": freeze_tool.V5_RECOVERY_RELEASE_RECORD,
+            "release_record_sha256": "c" * 64,
+            "tracked_clean": True,
+        },
+        "recovery_validator": {
+            "path": validator_path.relative_to(tmp_path).as_posix(),
+            "sha256": freeze_tool._sha256_file(validator_path),
+        },
+        "original_validation": {
+            "path": validation_path.relative_to(tmp_path).as_posix(),
+            "sha256": "0" * 64,
+            "status": "INVALID",
+        },
+        "recovered_validation": report,
+        "output": validation_path.with_name(
+            freeze_tool.V5_RECOVERY_OUTPUT_NAME
+        ).relative_to(tmp_path).as_posix(),
+    }
+    _append_fake_recovery_release_validator(validator_path, recovery["release_delta"])
+    recovery["recovery_validator"]["sha256"] = freeze_tool._sha256_file(
+        validator_path
+    )
+    validation_path.with_name(freeze_tool.V5_RECOVERY_OUTPUT_NAME).write_text(
+        freeze_tool.canonical_json(recovery), encoding="utf-8"
+    )
+
+    with pytest.raises(freeze_tool.FreezeManifestError, match="original validation binding"):
         freeze_tool._validate_v5_pilot_acceptance(protocol, protocol_path, tmp_path)
 
 

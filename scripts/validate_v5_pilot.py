@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -60,10 +62,189 @@ ARTIFACT_CLASS = "NON_REPORTABLE_V5_TALIF_ONLY_PILOT_ACCEPTANCE"
 PASS_DECISION = "ACCEPT_V5_TALIF_ONLY_120_EPOCH_PILOTS_RELEASE_FORMAL_FREEZE"
 FAIL_DECISION = "BLOCK_V5_AND_REQUIRE_NEW_PROTOCOL_AND_UNUSED_PILOT_SEEDS"
 INVALID_DECISION = "BLOCK_V5_AND_INVESTIGATE_PILOT_EVIDENCE_INTEGRITY"
+RECOVERY_SCHEMA_VERSION = 1
+RECOVERY_ARTIFACT_CLASS = "NON_REPORTABLE_V5_PILOT_VALIDATION_RECOVERY"
+RECOVERY_DECISION = "RECOVER_V5_PILOT_PASS_AFTER_VALIDATOR_PATH_EQUIVALENCE_FIX"
+RECOVERY_OUTPUT_NAME = "validation_path_recovery.json"
+RECOVERY_RELEASE_RECORD = "V5_VALIDATION_RECOVERY_RELEASE.json"
+RECOVERY_ORIGINAL_VALIDATION_SHA256 = (
+    "5cc85680923b6eee1e454dcf4cf7667f4271dc531d5837a529e57bfcaccd7e86"
+)
+RECOVERY_PILOT_EXECUTION_COMMIT = "6eeadd6389677347fe46ffa8d3bdec8c75455b44"
+RECOVERY_PROTOCOL_HASH = "a5b2a664de5142438061f479a37f3b55401499104abb28ee3cf1d674ec1d4527"
+RECOVERY_TRAINING_ENVIRONMENT_SHA256 = (
+    "f3b837c1554615bb97af91183ec450bf8f4bb43610ad47123aa1f161791d4fb6"
+)
+RECOVERY_ALLOWED_CHANGED_PATHS = (
+    "V5_TALIF_ONLY_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/validate_v3_pilot.py",
+    "scripts/validate_v5_pilot.py",
+    "src/talif_msresnet/freeze.py",
+    "tests/test_v5_execution_gates.py",
+    "tests/test_v5_release_flow.py",
+    "tests/test_validate_v5_pilot.py",
+)
 
 
 class PilotValidationError(RuntimeError):
     """Raised when the validator cannot establish the v5 pilot contract."""
+
+
+def _git_output(repository_root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise PilotValidationError(
+            f"Cannot inspect the v5 recovery release (git {' '.join(arguments)}): "
+            f"{detail or 'no details'}"
+        )
+    return completed.stdout.strip()
+
+
+def _git_bytes(repository_root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise PilotValidationError(
+            f"Cannot inspect the v5 recovery release (git {' '.join(arguments)}): "
+            f"{detail or 'no details'}"
+        )
+    return completed.stdout
+
+
+def _recovery_release_binding(repository_root: Path) -> dict[str, Any]:
+    commit = _git_output(repository_root, "rev-parse", "HEAD")
+    if (
+        len(commit) != 40
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        raise PilotValidationError("Current recovery release commit is not a full Git hash")
+    record_path = repository_root / RECOVERY_RELEASE_RECORD
+    record = _read_json(record_path, "v5 recovery release record")
+    implementation_commit = str(record.get("implementation_commit", ""))
+    if (
+        len(implementation_commit) != 40
+        or any(character not in "0123456789abcdef" for character in implementation_commit)
+    ):
+        raise PilotValidationError("Recovery release record has no implementation commit")
+    parents = _git_output(repository_root, "rev-list", "--parents", "-n", "1", commit).split()
+    if parents != [commit, implementation_commit]:
+        raise PilotValidationError(
+            "Recovery release must be the one-parent seal of its implementation commit"
+        )
+    _git_output(
+        repository_root,
+        "merge-base",
+        "--is-ancestor",
+        RECOVERY_PILOT_EXECUTION_COMMIT,
+        implementation_commit,
+    )
+    if _git_output(repository_root, "diff", "--name-only", f"{commit}..HEAD"):
+        raise PilotValidationError("Recovery release validation must run at the sealed HEAD")
+    if _git_output(repository_root, "status", "--porcelain", "--untracked-files=no"):
+        raise PilotValidationError("Recovery requires a clean tracked Git worktree")
+    implementation_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            repository_root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            RECOVERY_PILOT_EXECUTION_COMMIT,
+            implementation_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    expected_changes = tuple(f"M\t{path}" for path in RECOVERY_ALLOWED_CHANGED_PATHS)
+    if implementation_changes != expected_changes:
+        raise PilotValidationError(
+            "Recovery implementation delta is not the exact modification-only allowlist: "
+            f"observed={list(implementation_changes)} expected={list(expected_changes)}"
+        )
+    seal_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            repository_root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            implementation_commit,
+            commit,
+        ).splitlines()
+        if line.strip()
+    )
+    if seal_changes != (f"A\t{RECOVERY_RELEASE_RECORD}",):
+        raise PilotValidationError(
+            "Recovery release commit must add only the release record"
+        )
+    implementation_tree = _git_output(
+        repository_root, "rev-parse", f"{implementation_commit}^{{tree}}"
+    )
+    expected_record_top = {
+        "schema": "ta-lif-msresnet-v5-validation-recovery-release-v1",
+        "base_pilot_commit": RECOVERY_PILOT_EXECUTION_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "original_validation_sha256": RECOVERY_ORIGINAL_VALIDATION_SHA256,
+        "protocol_hash": RECOVERY_PROTOCOL_HASH,
+        "training_environment_sha256": RECOVERY_TRAINING_ENVIRONMENT_SHA256,
+        "allowed_changed_paths": list(RECOVERY_ALLOWED_CHANGED_PATHS),
+    }
+    mismatches = [
+        key for key, expected in expected_record_top.items() if record.get(key) != expected
+    ]
+    source_sha256 = record.get("implementation_file_sha256")
+    if not isinstance(source_sha256, Mapping) or set(source_sha256) != set(
+        RECOVERY_ALLOWED_CHANGED_PATHS
+    ):
+        mismatches.append("implementation_file_sha256")
+        source_sha256 = {}
+    for path in RECOVERY_ALLOWED_CHANGED_PATHS:
+        expected_sha256 = source_sha256.get(path)
+        committed_sha256 = hashlib.sha256(
+            _git_bytes(repository_root, "show", f"{implementation_commit}:{path}")
+        ).hexdigest()
+        if not isinstance(expected_sha256, str) or committed_sha256 != expected_sha256:
+            mismatches.append(f"implementation_file_sha256.{path}")
+    record_sha256 = record.get("record_sha256")
+    record_without_hash = dict(record)
+    record_without_hash.pop("record_sha256", None)
+    if record_sha256 != stable_hash(record_without_hash):
+        mismatches.append("record_sha256")
+    if mismatches:
+        raise PilotValidationError(
+            "Recovery release record is not the sealed reviewed implementation: "
+            + ", ".join(mismatches)
+        )
+    return {
+        "base_commit": RECOVERY_PILOT_EXECUTION_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "recovery_commit": commit,
+        "allowed_changed_paths": list(RECOVERY_ALLOWED_CHANGED_PATHS),
+        "observed_changes": list(implementation_changes),
+        "release_record": RECOVERY_RELEASE_RECORD,
+        "release_record_sha256": sha256_file(record_path),
+        "tracked_clean": True,
+    }
+
+
+def _report_without_timestamp(report: Mapping[str, Any]) -> dict[str, Any]:
+    comparable = dict(report)
+    comparable.pop("validated_at", None)
+    return comparable
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -180,6 +361,7 @@ def _bound_block_evidence(
     block: PilotBlock,
     manifest_rows: Sequence[Mapping[str, Any]],
     strict_health_validation: bool,
+    evidence_git_commit: str | None,
 ) -> tuple[dict[str, Any], list[str]]:
     failures: list[str] = []
     for label, path in (
@@ -235,7 +417,8 @@ def _bound_block_evidence(
                 protocol_path,
                 block.dataset,
                 repository_root=repository_root,
-                require_current_tracked_clean=True,
+                expected_git_commit=evidence_git_commit,
+                require_current_tracked_clean=evidence_git_commit is None,
             )
         except PilotV5Error as exc:
             failures.append(f"canonical health validation failed: {exc}")
@@ -383,6 +566,7 @@ def _validate_run(
     epochs: int,
     schedule: Mapping[str, Any],
     maximum_ratio: float,
+    allow_equivalent_absolute_output_dir: bool,
 ) -> tuple[dict[str, Any], str | None, str | None, str | None]:
     configured_thresholds = expected_config.analysis.get("validation_accuracy_thresholds")
     if not isinstance(configured_thresholds, Mapping):
@@ -400,6 +584,7 @@ def _validate_run(
         epochs=epochs,
         accuracy_threshold=formal_threshold,
         maximum_ratio=maximum_ratio,
+        allow_equivalent_absolute_output_dir=allow_equivalent_absolute_output_dir,
     )
     # The legacy helper reconstructs checkpoints and the formal convergence
     # fields.  Its two v3 acceptance failures are replaced by v5's dataset-
@@ -473,6 +658,8 @@ def validate_pilot(
     config_dir: str | Path,
     repository_root: str | Path = PROJECT_ROOT,
     strict_health_validation: bool = True,
+    evidence_git_commit: str | None = None,
+    allow_equivalent_absolute_output_dir: bool = False,
 ) -> dict[str, Any]:
     """Validate both v5 C1/C2 blocks and return one aggregate verdict."""
 
@@ -535,6 +722,7 @@ def validate_pilot(
             block=block,
             manifest_rows=rows,
             strict_health_validation=strict_health_validation,
+            evidence_git_commit=evidence_git_commit,
         )
         block_integrity.extend(evidence_failures)
         health = evidence.get("health")
@@ -581,6 +769,9 @@ def validate_pilot(
                 epochs=epochs,
                 schedule=schedule,
                 maximum_ratio=maximum_ratio,
+                allow_equivalent_absolute_output_dir=(
+                    allow_equivalent_absolute_output_dir
+                ),
             )
             runs[condition] = run_report
             block_integrity.extend(
@@ -707,7 +898,113 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "configs" / "v5_talif_only_pilot_generated",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--recover-from-invalid",
+        type=Path,
+        help=(
+            "Append one recovery PASS beside an immutable canonical INVALID; "
+            "requires --pilot-execution-commit and --output"
+        ),
+    )
+    parser.add_argument(
+        "--pilot-execution-commit",
+        help="Original reviewed commit bound by the health and pilot evidence",
+    )
     return parser
+
+
+def _recovery_report(
+    *,
+    report: Mapping[str, Any],
+    legacy_report: Mapping[str, Any],
+    invalid_path: Path,
+    invalid_report: Mapping[str, Any],
+    output: Path,
+    repository_root: Path,
+    pilot_execution_commit: str,
+) -> dict[str, Any]:
+    invalid_sha256 = sha256_file(invalid_path)
+    if invalid_sha256 != RECOVERY_ORIGINAL_VALIDATION_SHA256:
+        raise PilotValidationError(
+            "Canonical INVALID SHA-256 is not the authorized v5 recovery incident"
+        )
+    if report.get("status") != "PASS" or report.get("pass") is not True:
+        raise PilotValidationError("Recovery audit did not establish an aggregate PASS")
+    if invalid_report.get("status") != "INVALID" or invalid_report.get("pass") is not False:
+        raise PilotValidationError("--recover-from-invalid must name the original INVALID report")
+    if _report_without_timestamp(invalid_report) != _report_without_timestamp(legacy_report):
+        raise PilotValidationError(
+            "Legacy path behavior does not exactly reproduce the original INVALID"
+        )
+    if invalid_report.get("protocol_hash") != report.get("protocol_hash"):
+        raise PilotValidationError("Original INVALID and recovery audit use different protocols")
+    if invalid_report.get("acceptance_hash") != report.get("acceptance_hash"):
+        raise PilotValidationError("Original INVALID and recovery audit use different acceptances")
+    if report.get("protocol_hash") != RECOVERY_PROTOCOL_HASH:
+        raise PilotValidationError("Recovery protocol hash is not the frozen v5 protocol")
+    if report.get("training_environment_sha256") != RECOVERY_TRAINING_ENVIRONMENT_SHA256:
+        raise PilotValidationError(
+            "Recovery training environment is not the audited shared pilot environment"
+        )
+    recovered_datasets = report.get("datasets")
+    if not isinstance(recovered_datasets, Mapping):
+        raise PilotValidationError("Original INVALID has no complete dataset evidence")
+    for dataset in V5_PILOT_DATASETS:
+        recovered_dataset = recovered_datasets.get(dataset)
+        if not isinstance(recovered_dataset, Mapping):
+            raise PilotValidationError(f"Missing recovery dataset evidence for {dataset}")
+    if invalid_report.get("threshold_failures") != []:
+        raise PilotValidationError("Original INVALID contains aggregate threshold failures")
+    if pilot_execution_commit != RECOVERY_PILOT_EXECUTION_COMMIT:
+        raise PilotValidationError(
+            "--pilot-execution-commit is not the reviewed v5 pilot release commit"
+        )
+    observed_commits: set[str] = set()
+    for dataset in V5_PILOT_DATASETS:
+        health_path = recovered_datasets[dataset].get("health_report_path")
+        if not isinstance(health_path, str):
+            raise PilotValidationError(f"Recovery has no health report path for {dataset}")
+        health = _read_json(repository_root / health_path, f"{dataset} health report")
+        observed_commits.add(str(health.get("git_commit", "")))
+    if observed_commits != {pilot_execution_commit}:
+        raise PilotValidationError(
+            "Pilot execution commit differs from the health evidence: "
+            f"{sorted(observed_commits)}"
+        )
+    validator_path = Path(__file__).resolve()
+    release = _recovery_release_binding(repository_root)
+    return {
+        "schema_version": RECOVERY_SCHEMA_VERSION,
+        "artifact_class": RECOVERY_ARTIFACT_CLASS,
+        "reporting_eligibility": REPORTING_ELIGIBILITY,
+        "confirmatory_analysis_eligibility": False,
+        "status": "PASS",
+        "pass": True,
+        "decision": RECOVERY_DECISION,
+        "exit_code": 0,
+        "validated_at": report.get("validated_at"),
+        "protocol_hash": report.get("protocol_hash"),
+        "acceptance_hash": report.get("acceptance_hash"),
+        "pilot_execution_commit": pilot_execution_commit,
+        "recovery_validator_commit": release["recovery_commit"],
+        "release_delta": release,
+        "recovery_validator": {
+            "path": artifact_path_reference(validator_path, repository_root),
+            "sha256": sha256_file(validator_path),
+        },
+        "original_validation": {
+            "path": artifact_path_reference(invalid_path, repository_root),
+            "sha256": invalid_sha256,
+            "status": "INVALID",
+            "decision": invalid_report.get("decision"),
+            "legacy_reproduction": "EXACT_EXCEPT_VALIDATED_AT",
+            "legacy_reproduction_sha256": stable_hash(
+                _report_without_timestamp(legacy_report)
+            ),
+        },
+        "recovered_validation": dict(report),
+        "output": artifact_path_reference(output, repository_root),
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -716,25 +1013,77 @@ def main(argv: Sequence[str] | None = None) -> int:
         protocol = load_protocol(args.protocol)
         acceptance = protocol["pilot_acceptance"]
         canonical_output = (PROJECT_ROOT / acceptance["validation_output"]).resolve()
-        output = args.output.resolve() if args.output is not None else canonical_output
-        if output != canonical_output:
-            raise PilotValidationError(
-                "--output cannot override pilot_acceptance.validation_output"
-            )
+        recovery_mode = args.recover_from_invalid is not None
+        if recovery_mode:
+            if args.output is None or args.pilot_execution_commit is None:
+                raise PilotValidationError(
+                    "Recovery requires --output and --pilot-execution-commit"
+                )
+            invalid_path = args.recover_from_invalid.resolve()
+            if invalid_path != canonical_output:
+                raise PilotValidationError(
+                    "--recover-from-invalid must name the canonical validation output"
+                )
+            output = args.output.resolve()
+            expected_recovery_output = canonical_output.with_name(RECOVERY_OUTPUT_NAME)
+            if output != expected_recovery_output:
+                raise PilotValidationError(
+                    "Recovery output must be the fixed adjacent "
+                    f"{RECOVERY_OUTPUT_NAME} artifact"
+                )
+        else:
+            if args.pilot_execution_commit is not None:
+                raise PilotValidationError(
+                    "--pilot-execution-commit is valid only with --recover-from-invalid"
+                )
+            output = args.output.resolve() if args.output is not None else canonical_output
+            if output != canonical_output:
+                raise PilotValidationError(
+                    "--output cannot override pilot_acceptance.validation_output"
+                )
         if output.exists():
             raise PilotValidationError(
-                "Canonical v5 pilot validation output already exists; refusing overwrite"
+                "V5 pilot validation output already exists; refusing overwrite"
             )
         report = validate_pilot(
             protocol_path=args.protocol,
             config_dir=args.config_dir,
             repository_root=PROJECT_ROOT,
+            strict_health_validation=True,
+            evidence_git_commit=(
+                args.pilot_execution_commit if recovery_mode else None
+            ),
+            allow_equivalent_absolute_output_dir=recovery_mode,
         )
-        exclusive_create_json(output, report)
+        if recovery_mode:
+            invalid_report = _read_json(invalid_path, "original v5 pilot validation")
+            legacy_report = validate_pilot(
+                protocol_path=args.protocol,
+                config_dir=args.config_dir,
+                repository_root=PROJECT_ROOT,
+                strict_health_validation=True,
+                evidence_git_commit=args.pilot_execution_commit,
+                allow_equivalent_absolute_output_dir=False,
+            )
+            stored_report = _recovery_report(
+                report=report,
+                legacy_report=legacy_report,
+                invalid_path=invalid_path,
+                invalid_report=invalid_report,
+                output=output,
+                repository_root=PROJECT_ROOT,
+                pilot_execution_commit=args.pilot_execution_commit,
+            )
+        else:
+            stored_report = report
+        exclusive_create_json(output, stored_report)
     except Exception as exc:  # noqa: BLE001 - CLI must fail closed with one marker
         print(f"V5_PILOT_VALIDATION_ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    print(f"V5_PILOT_VALIDATION_{report['status']}")
+    marker = "V5_PILOT_VALIDATION_RECOVERY_PASS" if recovery_mode else (
+        f"V5_PILOT_VALIDATION_{report['status']}"
+    )
+    print(marker)
     print(f"NON_REPORTING_OUTPUT={output}")
     return int(report["exit_code"])
 

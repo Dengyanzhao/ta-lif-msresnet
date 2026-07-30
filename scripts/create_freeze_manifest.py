@@ -98,6 +98,28 @@ V5_REQUIRED_SOURCE_PATHS = (
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REMOTE_RE = re.compile(r"^(?:https?://|ssh://|git://|git@[^:]+:).+", re.IGNORECASE)
+V5_RECOVERY_ORIGINAL_VALIDATION_SHA256 = (
+    "5cc85680923b6eee1e454dcf4cf7667f4271dc531d5837a529e57bfcaccd7e86"
+)
+V5_RECOVERY_PILOT_EXECUTION_COMMIT = "6eeadd6389677347fe46ffa8d3bdec8c75455b44"
+V5_RECOVERY_PROTOCOL_HASH = (
+    "a5b2a664de5142438061f479a37f3b55401499104abb28ee3cf1d674ec1d4527"
+)
+V5_RECOVERY_TRAINING_ENVIRONMENT_SHA256 = (
+    "f3b837c1554615bb97af91183ec450bf8f4bb43610ad47123aa1f161791d4fb6"
+)
+V5_RECOVERY_OUTPUT_NAME = "validation_path_recovery.json"
+V5_RECOVERY_RELEASE_RECORD = "V5_VALIDATION_RECOVERY_RELEASE.json"
+V5_RECOVERY_ALLOWED_CHANGED_PATHS = (
+    "V5_TALIF_ONLY_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/validate_v3_pilot.py",
+    "scripts/validate_v5_pilot.py",
+    "src/talif_msresnet/freeze.py",
+    "tests/test_v5_execution_gates.py",
+    "tests/test_v5_release_flow.py",
+    "tests/test_validate_v5_pilot.py",
+)
 
 
 class FreezeManifestError(RuntimeError):
@@ -756,7 +778,7 @@ def _validate_v5_pilot_acceptance(
         "V5 pilot validation",
         kind="file",
     )
-    stored = dict(_read_json(validation_path, "v5 pilot validation"))
+    canonical = dict(_read_json(validation_path, "v5 pilot validation"))
 
     validator_path = project_root / "scripts" / "validate_v5_pilot.py"
     if not validator_path.is_file():
@@ -776,6 +798,112 @@ def _validate_v5_pilot_acceptance(
     validate_pilot = getattr(module, "validate_pilot", None)
     if not callable(validate_pilot):
         raise FreezeManifestError("V5 pilot validator has no validate_pilot entry point")
+    validate_recovery_release = getattr(module, "_recovery_release_binding", None)
+
+    recovery_path = validation_path.with_name(V5_RECOVERY_OUTPUT_NAME)
+    recovery: dict[str, Any] | None = None
+    if canonical.get("status") == "INVALID" and recovery_path.is_file():
+        recovery = dict(_read_json(recovery_path, "v5 pilot validation recovery"))
+        recovery_mismatches = []
+        if recovery.get("schema_version") != 1:
+            recovery_mismatches.append("schema_version")
+        if recovery.get("artifact_class") != "NON_REPORTABLE_V5_PILOT_VALIDATION_RECOVERY":
+            recovery_mismatches.append("artifact_class")
+        if recovery.get("status") != "PASS" or recovery.get("pass") is not True:
+            recovery_mismatches.append("PASS state")
+        if recovery.get("exit_code") != 0:
+            recovery_mismatches.append("exit_code")
+        if recovery.get("reporting_eligibility") != "FORBIDDEN_FROM_MANUSCRIPT_RESULTS":
+            recovery_mismatches.append("reporting_eligibility")
+        if recovery.get("confirmatory_analysis_eligibility") is not False:
+            recovery_mismatches.append("confirmatory_analysis_eligibility")
+        if recovery.get("decision") != (
+            "RECOVER_V5_PILOT_PASS_AFTER_VALIDATOR_PATH_EQUIVALENCE_FIX"
+        ):
+            recovery_mismatches.append("decision")
+        for key in ("pilot_execution_commit", "recovery_validator_commit"):
+            if not isinstance(recovery.get(key), str) or COMMIT_RE.fullmatch(
+                str(recovery.get(key))
+            ) is None:
+                recovery_mismatches.append(key)
+        original = recovery.get("original_validation")
+        if not isinstance(original, Mapping) or (
+            original.get("path") != validation_path.relative_to(project_root).as_posix()
+            or original.get("sha256") != _sha256_file(validation_path)
+            or original.get("sha256") != V5_RECOVERY_ORIGINAL_VALIDATION_SHA256
+            or original.get("status") != "INVALID"
+        ):
+            recovery_mismatches.append("original validation binding")
+        validator = recovery.get("recovery_validator")
+        if not isinstance(validator, Mapping) or (
+            validator.get("path") != validator_path.relative_to(project_root).as_posix()
+            or validator.get("sha256") != _sha256_file(validator_path)
+        ):
+            recovery_mismatches.append("recovery validator binding")
+        expected_output = recovery_path.relative_to(project_root).as_posix()
+        if recovery.get("output") != expected_output:
+            recovery_mismatches.append("output")
+        release_delta = recovery.get("release_delta")
+        if not isinstance(release_delta, Mapping):
+            recovery_mismatches.append("release_delta")
+        else:
+            expected_changes = [
+                f"M\t{path}" for path in V5_RECOVERY_ALLOWED_CHANGED_PATHS
+            ]
+            if (
+                release_delta.get("base_commit")
+                != V5_RECOVERY_PILOT_EXECUTION_COMMIT
+                or release_delta.get("recovery_commit")
+                != recovery.get("recovery_validator_commit")
+                or release_delta.get("allowed_changed_paths")
+                != list(V5_RECOVERY_ALLOWED_CHANGED_PATHS)
+                or release_delta.get("observed_changes") != expected_changes
+                or release_delta.get("release_record")
+                != V5_RECOVERY_RELEASE_RECORD
+                or not isinstance(release_delta.get("release_record_sha256"), str)
+                or SHA256_RE.fullmatch(release_delta["release_record_sha256"]) is None
+                or release_delta.get("tracked_clean") is not True
+            ):
+                recovery_mismatches.append("release_delta")
+        if not callable(validate_recovery_release):
+            recovery_mismatches.append("recovery release validator")
+        else:
+            try:
+                current_release_delta = validate_recovery_release(project_root)
+            except Exception as exc:
+                raise FreezeManifestError(
+                    "Current v5 recovery release fails its independent seal check: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            if not isinstance(release_delta, Mapping) or (
+                dict(release_delta) != dict(current_release_delta)
+            ):
+                recovery_mismatches.append("independent release_delta revalidation")
+        recovered = recovery.get("recovered_validation")
+        if not isinstance(recovered, Mapping):
+            recovery_mismatches.append("recovered validation")
+            stored = {}
+        else:
+            stored = dict(recovered)
+        if recovery.get("pilot_execution_commit") != V5_RECOVERY_PILOT_EXECUTION_COMMIT:
+            recovery_mismatches.append("pilot_execution_commit")
+        if recovery.get("protocol_hash") != V5_RECOVERY_PROTOCOL_HASH:
+            recovery_mismatches.append("protocol_hash")
+        if recovery.get("acceptance_hash") != canonical.get("acceptance_hash"):
+            recovery_mismatches.append("acceptance_hash")
+        if (
+            isinstance(recovered, Mapping)
+            and recovered.get("training_environment_sha256")
+            != V5_RECOVERY_TRAINING_ENVIRONMENT_SHA256
+        ):
+            recovery_mismatches.append("training_environment_sha256")
+        if recovery_mismatches:
+            raise FreezeManifestError(
+                "V5 pilot recovery binding is invalid: "
+                + ", ".join(recovery_mismatches)
+            )
+    else:
+        stored = canonical
 
     expected_top = {
         "schema_version": 1,
@@ -830,6 +958,13 @@ def _validate_v5_pilot_acceptance(
             config_dir=project_root
             / artifact_paths_for_protocol(protocol)["pilot_matrix"],
             repository_root=project_root,
+            strict_health_validation=True,
+            evidence_git_commit=(
+                str(recovery["pilot_execution_commit"])
+                if recovery is not None
+                else None
+            ),
+            allow_equivalent_absolute_output_dir=recovery is not None,
         )
     except Exception as exc:
         raise FreezeManifestError(
@@ -862,12 +997,14 @@ def _validate_v5_pilot_acceptance(
                 if isinstance(key, str) and key.endswith("_sha256")
             },
         }
-    return {
+    binding = {
         "artifact_class": stored.get("artifact_class"),
         "status": "PASS",
         "pass": True,
-        "path": validation_path.relative_to(project_root).as_posix(),
-        "sha256": _sha256_file(validation_path),
+        "path": (
+            recovery_path if recovery is not None else validation_path
+        ).relative_to(project_root).as_posix(),
+        "sha256": _sha256_file(recovery_path if recovery is not None else validation_path),
         "protocol_hash": stored["protocol_hash"],
         "acceptance_hash": stored["acceptance_hash"],
         "validated_at": stored.get("validated_at"),
@@ -878,6 +1015,16 @@ def _validate_v5_pilot_acceptance(
         },
         "datasets": dataset_evidence,
     }
+    if recovery is not None:
+        binding["recovery"] = {
+            "artifact_class": recovery.get("artifact_class"),
+            "path": recovery_path.relative_to(project_root).as_posix(),
+            "sha256": _sha256_file(recovery_path),
+            "pilot_execution_commit": recovery.get("pilot_execution_commit"),
+            "recovery_validator_commit": recovery.get("recovery_validator_commit"),
+            "original_validation": dict(recovery["original_validation"]),
+        }
+    return binding
 
 
 def _manifest_row(resolved: Any, config_path: Path) -> dict[str, Any]:
@@ -1080,6 +1227,14 @@ def build_manifest(
 
     repo_root = _git_repository(project_root)
     commit = _resolve_commit(project_root, freeze_commit, require_head=require_creation_state)
+    if is_v5 and isinstance(pilot_validation, Mapping):
+        recovery = pilot_validation.get("recovery")
+        if isinstance(recovery, Mapping) and recovery.get(
+            "recovery_validator_commit"
+        ) != commit:
+            raise FreezeManifestError(
+                "V5 recovery validator commit must equal the formal freeze commit"
+            )
     committed_protocol = _assert_committed_text(
         repo_root, commit, protocol_path, "Protocol at freeze commit"
     )

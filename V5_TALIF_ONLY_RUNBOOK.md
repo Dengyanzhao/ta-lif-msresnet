@@ -261,12 +261,43 @@ The validator requires, independently for C1 and C2:
 `ERROR` requires evidence audit; it does not authorize a rerun, seed
 substitution, artifact deletion, or manual correction of the validation JSON.
 
+### Append-only validator recovery
+
+If the canonical decision is `INVALID` solely because a completed run stored
+the repository-bound pilot output root as its equivalent absolute path, keep
+`validation.json` unchanged. After installing the reviewed recovery release,
+create exactly one adjacent recovery decision:
+
+```bash
+test "$(sha256sum results/pilot/v5_talif_only/validation.json | cut -d' ' -f1)" = \
+  "5cc85680923b6eee1e454dcf4cf7667f4271dc531d5837a529e57bfcaccd7e86"
+test ! -e results/pilot/v5_talif_only/validation_path_recovery.json
+
+"$PYTHON" scripts/validate_v5_pilot.py \
+  --protocol "$PROTOCOL" \
+  --config-dir "$PILOT_MATRIX" \
+  --recover-from-invalid results/pilot/v5_talif_only/validation.json \
+  --pilot-execution-commit 6eeadd6389677347fe46ffa8d3bdec8c75455b44 \
+  --output results/pilot/v5_talif_only/validation_path_recovery.json
+```
+
+The recovery command replays the legacy path check and requires it to reproduce
+the preserved `INVALID` exactly except for `validated_at`; it then runs the
+repaired check against the same files. The only recovery verdict that permits formal freeze is
+`V5_PILOT_VALIDATION_RECOVERY_PASS`. The recovery artifact binds the original
+`INVALID` SHA-256, the original pilot execution commit, the repaired validator
+commit and source SHA-256, and the complete revalidated PASS. It is exclusive-
+create and must never replace or modify the original decision.
+
 ## 7. Formal freeze
 
-Create the freeze manifest only after aggregate `PASS`. `PHASE_A_COMMIT` must
-still equal the reviewed release `HEAD`. The command revalidates the health and
-pilot evidence and binds the protocol, author record, exact formal matrix,
-runtime/gate sources, pilot validation, repository identity, and commit.
+Create the freeze manifest only after aggregate `PASS` or the exact recovery
+PASS above. For the recovery path, set `PHASE_A_COMMIT` to the reviewed recovery
+release commit; the manifest requires it to equal the recovery validator commit.
+The original pilot evidence remains bound to `6eeadd6389677347fe46ffa8d3bdec8c75455b44`.
+The command revalidates the health and pilot evidence and binds the protocol,
+author record, exact formal matrix, runtime/gate sources, both validation
+decisions, repository identity, and recovery commit.
 
 ```bash
 test "$(git rev-parse HEAD)" = "$PHASE_A_COMMIT"
