@@ -1,10 +1,10 @@
-"""TA-LIF x MS-ResNet reproducibility reference implementation.
+"""TA-LIF reproducibility reference implementation for directly trained SNNs.
 
 This package is a new reference implementation reconstructed from the manuscript
 and dissertation descriptions. It is not the original dissertation code.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 __all__ = ["build_model", "__version__"]
 

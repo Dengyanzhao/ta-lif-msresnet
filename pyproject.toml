@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ta-lif-msresnet"
-version = "0.1.0"
+version = "1.0.0"
 description = "Reference implementation for the frozen paired TA-LIF versus LIF evaluation in a directly trained spiking ResNet"
 readme = "README.md"
 license = { file = "LICENSE" }

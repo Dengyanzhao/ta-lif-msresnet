@@ -136,5 +136,5 @@ execution instructions and must not be combined with the V5 results.
 The software is released under the MIT License; the ownership decision is
 recorded in `RELEASE_LICENSE_DECISION.md`. Runtime dependencies and benchmark
 datasets remain subject to their own licenses and terms; see
-`THIRD_PARTY_NOTICES.md`. The final immutable tag and archive DOI will be
-recorded in `CITATION.cff` when the release metadata is complete.
+`THIRD_PARTY_NOTICES.md`. Release `v1.0.0` and the assigned archive DOI
+`10.5281/zenodo.21808938` are recorded in `CITATION.cff`.
