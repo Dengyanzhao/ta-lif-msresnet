@@ -404,9 +404,11 @@ groups and refuses incomplete or mixed blocks. Table 6 keeps missing
 efficiency measurements explicit rather than imputing them and reports the
 paired engineering-tolerance states defined above.
 
-## Release blockers
+## Release metadata
 
-Before repository release, resolve `LICENSE_CHOICE_REQUIRED.md`, complete
-`THIRD_PARTY_NOTICES.md`, create `CITATION.cff`, archive the exact frozen
-configs/results/checksums/environment, and insert the repository commit and
-archive DOI into the manuscript.
+The source is licensed under the MIT License; the decision and ownership record
+is retained in `LICENSE_CHOICE_REQUIRED.md`. `THIRD_PARTY_NOTICES.md` records the
+dependency and dataset boundary. Before the immutable repository release,
+finalize `CITATION.cff` from its template, archive the exact frozen
+configs/results/checksums/environment, and insert the experiment commit, release
+commit, immutable tag, archive DOI, and checksum into the manuscript.
