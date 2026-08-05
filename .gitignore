@@ -26,3 +26,12 @@ checkpoints/**/*.pt
 checkpoints/**/*.pth
 *.log
 .DS_Store
+
+# Local release workspaces and evidence are distributed separately.
+/.tmp*/
+/data/
+/environment/
+/results/
+/checkpoints/
+/configs/generated/
+/build/

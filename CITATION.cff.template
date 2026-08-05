@@ -1,6 +1,6 @@
 cff-version: 1.2.0
-message: "Cite the archived release of the TA-LIF x MS-ResNet reproducibility package."
-title: "TA-LIF x MS-ResNet Reproducibility Package"
+message: "Cite the archived release of the V5 TA-LIF reproducibility package."
+title: "TA-LIF in Directly Trained Spiking Residual Networks"
 type: software
 version: "[RELEASE VERSION]"
 date-released: "[YYYY-MM-DD]"
@@ -13,5 +13,4 @@ authors:
     given-names: "Song"
 repository-code: "https://github.com/Dengyanzhao/ta-lif-msresnet"
 doi: "[ZENODO DOI]"
-commit: "[EXACT COMMIT]"
 license: "MIT"
