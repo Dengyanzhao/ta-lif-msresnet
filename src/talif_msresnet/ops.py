@@ -16,6 +16,47 @@ import torch
 from torch import nn
 
 
+NEURON_OPERATION_MODES = frozenset(
+    {
+        "none",
+        "shared_window",
+        "time_indexed_bank",
+        "count_indexed_bank",
+    }
+)
+
+
+def resolve_neuron_operation_mode(
+    *,
+    talif_active: bool | None = None,
+    neuron_operation_mode: str | None = None,
+) -> str:
+    """Resolve explicit V6 control accounting with legacy TA-LIF support.
+
+    ``talif_active`` predates the V6 ablations and denotes the original
+    count-indexed TA-LIF implementation.  New callers must use
+    ``neuron_operation_mode`` so a shared window or time-indexed bank is not
+    accidentally charged for per-neuron spike-history state.
+    """
+
+    if neuron_operation_mode is not None:
+        mode = str(neuron_operation_mode).strip().lower()
+        if mode not in NEURON_OPERATION_MODES:
+            raise ValueError(
+                "neuron_operation_mode must be one of "
+                f"{sorted(NEURON_OPERATION_MODES)}, got {neuron_operation_mode!r}"
+            )
+        if talif_active is not None:
+            legacy_mode = "count_indexed_bank" if talif_active else "none"
+            if mode != legacy_mode:
+                raise ValueError(
+                    "talif_active conflicts with neuron_operation_mode: "
+                    f"{talif_active!r} implies {legacy_mode!r}, got {mode!r}"
+                )
+        return mode
+    return "count_indexed_bank" if talif_active else "none"
+
+
 @dataclass(frozen=True)
 class OperationEstimate:
     batch_size: int
@@ -24,10 +65,12 @@ class OperationEstimate:
     syops: float
     binary_layer_calls: int
     analog_layer_calls: int
+    shared_threshold_window_accesses: float
     threshold_bank_accesses: float
     spike_count_updates: float
     firing_rate: float | None
     activity_elements: float | None
+    neuron_operation_mode: str = "none"
     method: str = "forward_hooks_activity_scaled"
 
     def per_sample(self) -> dict[str, float | int | str | None]:
@@ -38,6 +81,7 @@ class OperationEstimate:
             "dense_mac_equivalents",
             "macs",
             "syops",
+            "shared_threshold_window_accesses",
             "threshold_bank_accesses",
             "spike_count_updates",
             "activity_elements",
@@ -114,6 +158,7 @@ def estimate_energy(
     operation_counts = (
         operations.macs,
         operations.syops,
+        operations.shared_threshold_window_accesses,
         operations.threshold_bank_accesses,
         operations.spike_count_updates,
     )
@@ -129,6 +174,7 @@ def estimate_energy(
     energy = (
         operations.macs * constants.mac_j
         + operations.syops * constants.syop_j
+        + operations.shared_threshold_window_accesses * constants.threshold_access_j
         + operations.threshold_bank_accesses * constants.threshold_access_j
         + operations.spike_count_updates * constants.count_update_j
     )
@@ -187,20 +233,50 @@ def _numeric_diagnostic(diagnostics: Mapping[str, Any], *names: str) -> float | 
     return None
 
 
+def _neuron_layer_step_calls(diagnostics: Mapping[str, Any]) -> float | None:
+    """Read the number of logical neuron-layer evaluations from diagnostics."""
+
+    reported = _numeric_diagnostic(diagnostics, "neuron_layer_step_calls")
+    if reported is not None:
+        return reported
+    layers = diagnostics.get("layers")
+    timesteps = _numeric_diagnostic(diagnostics, "timesteps")
+    if isinstance(layers, Mapping) and timesteps is not None:
+        return float(len(layers) * timesteps)
+    return None
+
+
 def activity_from_diagnostics(
     diagnostics: Mapping[str, Any] | None,
     *,
-    talif_active: bool,
+    talif_active: bool | None = None,
+    neuron_operation_mode: str | None = None,
 ) -> dict[str, float | None | str]:
-    """Extract activity and explicitly labeled TA-LIF access estimates."""
+    """Extract activity and explicit neuron-control operation estimates.
+
+    Shared and time-indexed windows select two scalar boundaries once for each
+    neuron-layer evaluation.  The full TA-LIF count-indexed bank selects two
+    boundaries and updates history for each neuron state.  These are logical
+    control-operation proxies, not an instruction-level or memory-traffic
+    trace; measured CUDA latency and memory remain separate observations.
+    """
+
+    mode = resolve_neuron_operation_mode(
+        talif_active=talif_active,
+        neuron_operation_mode=neuron_operation_mode,
+    )
 
     if not diagnostics:
+        shared_accesses = None if mode == "shared_window" else 0.0
+        bank_accesses = None if mode in {"time_indexed_bank", "count_indexed_bank"} else 0.0
+        count_updates = None if mode == "count_indexed_bank" else 0.0
         return {
             "firing_rate": None,
             "activity_elements": None,
-            "threshold_bank_accesses": 0.0 if not talif_active else None,
-            "spike_count_updates": 0.0 if not talif_active else None,
-            "activity_method": "diagnostics_unavailable",
+            "shared_threshold_window_accesses": shared_accesses,
+            "threshold_bank_accesses": bank_accesses,
+            "spike_count_updates": count_updates,
+            "activity_method": f"{mode};diagnostics_unavailable",
         }
     spike_count = _numeric_diagnostic(diagnostics, "spike_count", "spikes")
     elements = _numeric_diagnostic(diagnostics, "elements", "activity_elements", "neuron_updates")
@@ -208,31 +284,39 @@ def activity_from_diagnostics(
     if firing_rate is None and spike_count is not None and elements and elements > 0:
         firing_rate = spike_count / elements
 
-    threshold_accesses = _numeric_diagnostic(
-        diagnostics, "threshold_bank_accesses", "threshold_accesses"
-    )
-    count_updates = _numeric_diagnostic(diagnostics, "spike_count_updates", "count_updates")
-    method = "reported_by_model"
-    if talif_active and elements is not None:
-        if threshold_accesses is None:
-            # TA-LIF selects both lower and upper boundaries once per neuron-state
-            # evaluation.  This is an operation estimate, not a memory-traffic trace.
+    shared_accesses = 0.0
+    threshold_accesses = 0.0
+    count_updates = 0.0
+    if mode in {"shared_window", "time_indexed_bank"}:
+        layer_steps = _neuron_layer_step_calls(diagnostics)
+        if layer_steps is None:
+            raise ValueError(
+                f"{mode} operation accounting requires neuron_layer_step_calls diagnostics"
+            )
+        if mode == "shared_window":
+            shared_accesses = 2.0 * layer_steps
+            method = "estimated_two_shared_window_boundary_reads_per_neuron_layer_step"
+        else:
+            threshold_accesses = 2.0 * layer_steps
+            method = "estimated_two_time_indexed_bank_boundary_reads_per_neuron_layer_step"
+    elif mode == "count_indexed_bank":
+        if elements is None:
+            threshold_accesses = None
+            count_updates = None
+        else:
             threshold_accesses = 2.0 * elements
-            method = "estimated_two_boundary_reads_per_talif_state"
-        if count_updates is None:
             count_updates = elements
-            if method == "reported_by_model":
-                method = "estimated_one_count_update_per_talif_state"
-    elif not talif_active:
-        threshold_accesses = 0.0
-        count_updates = 0.0
+        method = "estimated_two_count_indexed_bank_boundary_reads_and_one_count_update_per_state"
+    else:
+        method = "fixed_window_no_adaptive_routing_state"
 
     return {
         "firing_rate": firing_rate,
         "activity_elements": elements,
+        "shared_threshold_window_accesses": shared_accesses,
         "threshold_bank_accesses": threshold_accesses,
         "spike_count_updates": count_updates,
-        "activity_method": method,
+        "activity_method": f"{mode};{method}",
     }
 
 
@@ -284,9 +368,18 @@ class OperationCounter:
         *,
         batch_size: int,
         diagnostics: Mapping[str, Any] | None,
-        talif_active: bool,
+        talif_active: bool | None = None,
+        neuron_operation_mode: str | None = None,
     ) -> OperationEstimate:
-        activity = activity_from_diagnostics(diagnostics, talif_active=talif_active)
+        mode = resolve_neuron_operation_mode(
+            talif_active=talif_active,
+            neuron_operation_mode=neuron_operation_mode,
+        )
+        activity = activity_from_diagnostics(
+            diagnostics,
+            neuron_operation_mode=mode,
+        )
+        shared_accesses = activity["shared_threshold_window_accesses"]
         threshold_accesses = activity["threshold_bank_accesses"]
         count_updates = activity["spike_count_updates"]
         return OperationEstimate(
@@ -296,6 +389,9 @@ class OperationCounter:
             syops=self.syops,
             binary_layer_calls=self.binary_layer_calls,
             analog_layer_calls=self.analog_layer_calls,
+            shared_threshold_window_accesses=(
+                float(shared_accesses) if shared_accesses is not None else float("nan")
+            ),
             threshold_bank_accesses=(
                 float(threshold_accesses) if threshold_accesses is not None else float("nan")
             ),
@@ -310,5 +406,6 @@ class OperationCounter:
                 if activity["activity_elements"] is not None
                 else None
             ),
+            neuron_operation_mode=mode,
             method=f"forward_hooks_activity_scaled;{activity['activity_method']}",
         )

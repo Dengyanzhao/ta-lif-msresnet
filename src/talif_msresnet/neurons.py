@@ -27,7 +27,11 @@ __all__ = [
     "surrogate_spike",
     "BaseNeuron",
     "LIFNeuron",
+    "RouteMatchedLIFNeuron",
+    "PLIFStyleNeuron",
     "TALIFNeuron",
+    "SharedWindowTALIFNeuron",
+    "TimeIndexedTALIFNeuron",
     "LIF",
     "TALIF",
 ]
@@ -348,6 +352,91 @@ class LIFNeuron(BaseNeuron):
         return spike
 
 
+class RouteMatchedLIFNeuron(LIFNeuron):
+    """Fixed-window LIF using the TA-LIF non-firing gradient route.
+
+    The hard forward dynamics are identical to :class:`LIFNeuron`.  Only the
+    non-firing membrane derivative differs because the spike factor remains
+    attached on the quiet branch.  This is the V6 route-only ablation (M1).
+    """
+
+    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        if not x.is_floating_point():
+            x = x.float()
+        previous = self._prepare_membrane(x)
+        u = previous + x
+        v1, v2 = self._window(u)
+        spike = rectangular_spike(u, v1, v2)
+        fired = spike.detach().bool()
+        fired_branch = self.tau * u * (1.0 - spike.detach()) + self.v_reset
+        quiet_branch = self.v_rest + self.tau * (u - self.v_rest) * (1.0 - spike)
+        membrane = torch.where(fired, fired_branch, quiet_branch)
+        self._mem = membrane
+        self.last_c_pre = None
+        surrogate_active = (u >= v1) & (u <= v2) if self._collect_activity else None
+        self._record(spike, membrane, surrogate_active)
+        return spike
+
+
+class PLIFStyleNeuron(LIFNeuron):
+    """Protocol-matched LIF with a learnable decay coefficient.
+
+    This keeps the repository's LIF update equation, reset-gradient route, hard
+    threshold, and rectangular surrogate fixed.  Only the scalar decay is
+    learned through a logit parameterisation.  It is therefore deliberately
+    described as ``PLIF-style`` rather than an exact reimplementation of a
+    different discretisation of PLIF.
+    """
+
+    def __init__(
+        self,
+        tau: float = 0.5,
+        threshold: float = 1.0,
+        surrogate_width: float = 1.0,
+        v_rest: float = 0.0,
+        v_reset: float = 0.0,
+    ) -> None:
+        if not 0.0 < float(tau) < 1.0:
+            raise ValueError("PLIF-style initial decay must be in (0, 1)")
+        super().__init__(
+            tau=tau,
+            threshold=threshold,
+            surrogate_width=surrogate_width,
+            v_rest=v_rest,
+            v_reset=v_reset,
+        )
+        initial = torch.tensor(float(tau), dtype=torch.float32)
+        self.raw_decay = nn.Parameter(torch.logit(initial))
+
+    @property
+    def decay(self) -> Tensor:
+        return torch.sigmoid(self.raw_decay)
+
+    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        if not x.is_floating_point():
+            x = x.float()
+        previous = self._prepare_membrane(x)
+        u = previous + x
+        v1, v2 = self._window(u)
+        spike = rectangular_spike(u, v1, v2)
+        fired = spike.detach().bool()
+        decay = self.decay.to(device=u.device, dtype=u.dtype)
+        fired_branch = decay * u * (1.0 - spike.detach()) + self.v_reset
+        quiet_branch = self.v_rest + decay * (u - self.v_rest) * (1.0 - spike.detach())
+        membrane = torch.where(fired, fired_branch, quiet_branch)
+        self._mem = membrane
+        self.last_c_pre = None
+        surrogate_active = (u >= v1) & (u <= v2) if self._collect_activity else None
+        self._record(spike, membrane, surrogate_active)
+        return spike
+
+    def extra_repr(self) -> str:
+        return (
+            f"initial_decay={self.tau}, v_rest={self.v_rest}, "
+            f"v_reset={self.v_reset}"
+        )
+
+
 class TALIFNeuron(BaseNeuron):
     """Spike-history-driven threshold-adaptive LIF neuron.
 
@@ -444,6 +533,105 @@ class TALIFNeuron(BaseNeuron):
 
     def extra_repr(self) -> str:
         return f"steps={self.steps}, delta_min={self.delta_min}, {super().extra_repr()}"
+
+
+class SharedWindowTALIFNeuron(TALIFNeuron):
+    """One shared trainable threshold window with the TA-LIF gradient route.
+
+    The single bank entry is broadcast to every element and time step, so this
+    condition has trainable window parameters but no routing index (V6 M2).
+    """
+
+    def __init__(
+        self,
+        *,
+        tau: float = 0.5,
+        threshold: float = 1.0,
+        width: float = 1.0,
+        delta_min: float = 1e-3,
+        v_rest: float = 0.0,
+        v_reset: float = 0.0,
+    ) -> None:
+        super().__init__(
+            steps=1,
+            tau=tau,
+            threshold=threshold,
+            width=width,
+            delta_min=delta_min,
+            v_rest=v_rest,
+            v_reset=v_reset,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        if not x.is_floating_point():
+            x = x.float()
+        previous = self._prepare_membrane(x)
+        u = previous + x
+        v1 = self.v1[0].to(device=u.device, dtype=u.dtype)
+        v2 = self.v2[0].to(device=u.device, dtype=u.dtype)
+        spike = rectangular_spike(u, v1, v2)
+        fired = spike.detach().bool()
+        fired_branch = self.tau * u * (1.0 - spike.detach()) + self.v_reset
+        quiet_branch = self.v_rest + self.tau * (u - self.v_rest) * (1.0 - spike)
+        membrane = torch.where(fired, fired_branch, quiet_branch)
+        self._mem = membrane
+        self._count = None
+        self.last_c_pre = None
+        surrogate_active = (u >= v1) & (u <= v2) if self._collect_activity else None
+        self._record(spike, membrane, surrogate_active)
+        return spike
+
+
+class TimeIndexedTALIFNeuron(TALIFNeuron):
+    """Trainable threshold bank routed by ``k=min(t, T-1)`` (V6 M3)."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._time_index = 0
+        self.last_time_index: Optional[int] = None
+
+    @property
+    def time_index(self) -> int:
+        return self._time_index
+
+    def reset_state(self, clear_stats: bool = True) -> None:
+        super().reset_state(clear_stats=clear_stats)
+        self._time_index = 0
+        self.last_time_index = None
+
+    reset = reset_state
+
+    def forward(self, x: Tensor) -> Tensor:  # type: ignore[override]
+        if not x.is_floating_point():
+            x = x.float()
+        state_changed = (
+            self._mem is None
+            or self._mem.shape != x.shape
+            or self._mem.device != x.device
+            or self._mem.dtype != x.dtype
+        )
+        if state_changed:
+            self._time_index = 0
+        previous = self._prepare_membrane(x)
+        u = previous + x
+        route_index = min(self._time_index, self.steps - 1)
+        index = torch.full(x.shape, route_index, device=x.device, dtype=torch.long)
+        bank_v1 = self.v1.to(device=u.device, dtype=u.dtype)
+        bank_v2 = self.v2.to(device=u.device, dtype=u.dtype)
+        v1, v2 = _select_history_windows(bank_v1, bank_v2, index)
+        spike = rectangular_spike(u, v1, v2)
+        fired = spike.detach().bool()
+        fired_branch = self.tau * u * (1.0 - spike.detach()) + self.v_reset
+        quiet_branch = self.v_rest + self.tau * (u - self.v_rest) * (1.0 - spike)
+        membrane = torch.where(fired, fired_branch, quiet_branch)
+        self._mem = membrane
+        self._count = None
+        self.last_c_pre = None
+        self.last_time_index = route_index
+        self._time_index += 1
+        surrogate_active = (u >= v1) & (u <= v2) if self._collect_activity else None
+        self._record(spike, membrane, surrogate_active)
+        return spike
 
 
 # Short aliases keep configuration-driven code concise and preserve common

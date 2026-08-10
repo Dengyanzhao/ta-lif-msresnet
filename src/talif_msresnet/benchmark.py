@@ -163,7 +163,8 @@ def _operation_batch(
     *,
     batch_size: int,
     device: torch.device,
-    talif_active: bool,
+    talif_active: bool | None,
+    neuron_operation_mode: str | None,
 ) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
     sample = _to_device(input_factory(batch_size), device)
     with torch.inference_mode(), OperationCounter(model) as counter:
@@ -174,6 +175,7 @@ def _operation_batch(
             batch_size=batch_size,
             diagnostics=diagnostics,
             talif_active=talif_active,
+            neuron_operation_mode=neuron_operation_mode,
         )
     return estimate.per_sample(), diagnostics
 
@@ -186,7 +188,8 @@ def benchmark_model(
     warmup_iterations: int = 25,
     iterations: int = 100,
     device: str | torch.device = "cuda",
-    talif_active: bool = False,
+    talif_active: bool | None = None,
+    neuron_operation_mode: str | None = None,
     energy_constants: EnergyConstants | None = None,
 ) -> BenchmarkResult:
     """Benchmark B=1 and B=128 (or explicit sizes) using synchronized CUDA events."""
@@ -225,6 +228,7 @@ def benchmark_model(
                     batch_size=size,
                     device=cuda_device,
                     talif_active=talif_active,
+                    neuron_operation_mode=neuron_operation_mode,
                 )
                 operations[size] = operation_record
                 # Reconstruct the aggregate count fields needed by the energy
@@ -256,6 +260,7 @@ def _operation_estimate_from_record(record: Mapping[str, Any], batch_size: int) 
         syops=value("syops"),
         binary_layer_calls=int(record.get("binary_layer_calls", 0)),
         analog_layer_calls=int(record.get("analog_layer_calls", 0)),
+        shared_threshold_window_accesses=value("shared_threshold_window_accesses"),
         threshold_bank_accesses=value("threshold_bank_accesses"),
         spike_count_updates=value("spike_count_updates"),
         firing_rate=record.get("firing_rate"),

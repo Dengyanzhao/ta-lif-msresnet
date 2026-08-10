@@ -53,6 +53,13 @@ from .pilot_v5 import (
     resolve_pilot_block as resolve_v5_pilot_block,
     validate_health_report as validate_v5_health_report,
 )
+from .pilot_v6 import (
+    PilotV6Error,
+    expected_pilot_plan_payload as expected_v6_pilot_plan_payload,
+    require_v6_author_freeze,
+    resolve_pilot_block as resolve_v6_pilot_block,
+    validate_health_report as validate_v6_health_report,
+)
 from .utils import (
     AverageMeter,
     JSONLLogger,
@@ -108,7 +115,7 @@ def _is_ta_parameter(name: str) -> bool:
     tokens = (
         "ta_lif", "talif", "threshold_window", "adaptive_threshold", "theta_low", "theta_high",
         "theta_l", "theta_h", "delta_min", "window_low", "window_high", "activity_count",
-        ".center", ".raw_width",
+        ".center", ".raw_width", ".raw_decay",
     )
     return any(token in lowered for token in tokens)
 
@@ -208,7 +215,12 @@ def build_optimizer_and_scheduler(
         or opt.exclude_norm_and_bias_from_weight_decay
     ):
         raise RuntimeError("v4 optimizer repairs require protocol_version >= 4")
-    is_ta_model = config.model.neuron == "ta_lif"
+    is_ta_model = config.model.neuron in {
+        "ta_lif",
+        "shared_window_ta_lif",
+        "time_indexed_ta_lif",
+        "plif_style",
+    }
     base, ta, ta_names = split_parameter_groups(model, is_ta_model)
     groups: List[Dict[str, Any]] = []
     group_specs: List[Dict[str, Any]] = []
@@ -264,8 +276,9 @@ def build_optimizer_and_scheduler(
         # gradients are disabled until the prespecified 5% warm-up ends.
         for parameter in ta:
             parameter.requires_grad_(False)
+        adaptive_role = "adaptive" if config.protocol_version == 6 else "ta"
         add_group(
-            ta, ta_names, role="ta", lr=opt.lr * opt.ta_lr_scale,
+            ta, ta_names, role=adaptive_role, lr=opt.lr * opt.ta_lr_scale,
             weight_decay=opt.ta_weight_decay,
         )
     optimizer = torch.optim.SGD(groups, lr=opt.lr, momentum=opt.momentum)
@@ -1163,7 +1176,7 @@ def run(
     """Execute a run, preserving both successful and failed run artifacts."""
 
     expected_frozen_environment: str | None = None
-    if config.protocol_version in (4, 5):
+    if config.protocol_version in (4, 5, 6):
         if not isinstance(orchestrator_evidence, Mapping):
             raise ValueError(
                 f"Protocol v{config.protocol_version} requires validated "
@@ -1519,11 +1532,11 @@ def _formal_execution_evidence(
     *,
     protocol_path: str | Path,
 ) -> dict[str, Any]:
-    """Extract the one pilot-bound environment authorized for v4/v5 formal work."""
+    """Extract the one pilot-bound environment authorized for v4-v6 formal work."""
 
     version = int(protocol.get("protocol_version", 0))
-    if version not in (4, 5):
-        raise ValueError("Frozen TA-LIF formal evidence requires protocol_version 4 or 5")
+    if version not in (4, 5, 6):
+        raise ValueError("Frozen TA-LIF formal evidence requires protocol_version 4, 5, or 6")
     pilot = freeze_manifest.get("pilot_validation")
     if not isinstance(pilot, Mapping):
         raise ValueError(f"V{version} freeze manifest has no pilot_validation binding")
@@ -1536,10 +1549,8 @@ def _formal_execution_evidence(
         key for key, expected in expected_top.items() if pilot.get(key) != expected
     ]
     datasets = pilot.get("datasets")
-    if not isinstance(datasets, Mapping) or set(datasets) != {
-        "cifar100",
-        "cifar10dvs",
-    }:
+    expected_datasets = {"cifar100"} if version == 6 else {"cifar100", "cifar10dvs"}
+    if not isinstance(datasets, Mapping) or set(datasets) != expected_datasets:
         mismatches.append("datasets")
         datasets = {}
     environment_hashes = {
@@ -1557,7 +1568,7 @@ def _formal_execution_evidence(
     ):
         mismatches.append("single shared pilot training environment")
     pilot_environment_sha256 = pilot.get("training_environment_sha256")
-    if version == 5 and (
+    if version in (5, 6) and (
         not isinstance(pilot_environment_sha256, str)
         or environment_hashes != {pilot_environment_sha256}
     ):
@@ -1650,8 +1661,8 @@ def _validate_orchestrator_pilot_plan(
     protocol = load_protocol(protocol_path)
     version = int(protocol.get("protocol_version", 1))
     is_talif_pilot = (
-        version in (3, 4, 5)
-        and protocol.get("study_stage") == "pilot_and_formal"
+        version in (3, 4, 5, 6)
+        and protocol.get("study_stage") in {"pilot_and_formal", "health_pilot_formal"}
     )
     talif_block: Any = None
     runtime_context: Mapping[str, Any] | None = None
@@ -1680,6 +1691,14 @@ def _validate_orchestrator_pilot_plan(
                 validate_v5_health_report,
                 expected_v5_pilot_plan_payload,
                 "NON_REPORTABLE_V5_PILOT_PLAN",
+            ),
+            6: (
+                resolve_v6_pilot_block,
+                PilotV6Error,
+                require_v6_author_freeze,
+                validate_v6_health_report,
+                expected_v6_pilot_plan_payload,
+                "NON_REPORTABLE_V6_MECHANISM_PILOT_PLAN",
             ),
         }
         (
@@ -1782,6 +1801,11 @@ def _validate_orchestrator_pilot_plan(
             raise ValueError("The tracked worktree changed after the pilot health gate")
     elif is_talif_pilot:
         assert talif_block is not None
+        talif_conditions = tuple(
+            getattr(talif_block, "conditions", ("C1", "C2"))
+        )
+        if not talif_conditions:
+            raise ValueError(f"V{version} pilot block has no authorized conditions")
         try:
             health_report = validate_health_report(
                 talif_block.health_output,
@@ -1828,7 +1852,7 @@ def _validate_orchestrator_pilot_plan(
                 row["config_file"]
                 for row in manifest_rows
                 if row.get("dataset") == talif_block.dataset
-                and row.get("condition") == "C1"
+                and row.get("condition") == talif_conditions[0]
             ),
             protocol_path,
         )
@@ -1861,7 +1885,9 @@ def _validate_orchestrator_pilot_plan(
         raise ValueError("Pilot and formal output roots are not isolated")
     runs = payload.get("runs")
     expected_conditions = (
-        {"C1", "C2"} if is_talif_pilot else {"C1", "C2", "C3", "C4"}
+        set(getattr(talif_block, "conditions", ("C1", "C2")))
+        if is_talif_pilot and talif_block is not None
+        else {"C1", "C2", "C3", "C4"}
     )
     expected_run_count = len(expected_conditions)
     if not isinstance(runs, list) or len(runs) != expected_run_count:
@@ -1919,7 +1945,7 @@ def _validate_orchestrator_pilot_plan(
                 "runtime_context": dict(runtime_context),
             }
         )
-        if version == 5:
+        if version in (5, 6):
             evidence.update(
                 {
                     "development_probe_hash": payload.get("development_probe_hash"),
@@ -1962,7 +1988,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("The orchestrator pilot plan cannot be used for a dry run")
     protocol = load_protocol(args.protocol)
     protocol_version = int(protocol.get("protocol_version", 1))
-    if protocol_version in (3, 4, 5) and args.dry_run:
+    if protocol_version in (3, 4, 5, 6) and args.dry_run:
         raise SystemExit(
             f"Protocol v{protocol_version} training dry-runs are disabled; use "
             "generate_run_configs.py --dry-run and reserve training commands for "
@@ -1990,7 +2016,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config.analysis.get("protocol_hash") != report.protocol_hash:
         raise SystemExit("Run config protocol hash is stale; regenerate configs from the current protocol")
     if (
-        protocol_version in (3, 4, 5)
+        protocol_version in (3, 4, 5, 6)
         and not args.dry_run
         and not pilot_active
     ):
@@ -2014,7 +2040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"Pilot plan validation failed: {exc}") from exc
-    elif protocol_version in (4, 5) and not args.dry_run:
+    elif protocol_version in (4, 5, 6) and not args.dry_run:
         if formal_freeze is None:
             raise SystemExit(
                 f"Protocol v{protocol_version} formal execution has no verified freeze manifest"

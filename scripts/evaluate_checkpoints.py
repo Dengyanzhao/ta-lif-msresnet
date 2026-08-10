@@ -27,6 +27,14 @@ from talif_msresnet.config import (  # noqa: E402
     load_protocol,
     validate_run_mapping,
 )
+from talif_msresnet.config_v6 import (  # noqa: E402
+    canonicalize_v6_artifact_run_mapping,
+    validate_v6_cifar100_provenance_files,
+)
+from talif_msresnet.benchmark_v6 import (  # noqa: E402
+    V6BenchmarkError,
+    validate_receipt as validate_v6_benchmark_receipt,
+)
 from talif_msresnet.data import build_test_loader  # noqa: E402
 from talif_msresnet.freeze import verify_formal_freeze  # noqa: E402
 from talif_msresnet.models import build_model  # noqa: E402
@@ -272,7 +280,12 @@ def _audit_all_frozen(
     rows: list[dict[str, str]],
     results_root: Path,
     protocol_hash: str,
+    protocol: Mapping[str, Any],
+    v6_test_source: Mapping[str, str] | None = None,
 ) -> None:
+    is_v6 = int(protocol.get("protocol_version", 1)) == 6
+    if is_v6:
+        v6_test_source = _require_v6_test_source_binding(v6_test_source)
     errors: list[str] = []
     for row in rows:
         run_id = row["run_id"]
@@ -304,17 +317,50 @@ def _audit_all_frozen(
         if not checkpoint.exists():
             errors.append(f"{run_id}: missing best.pt")
             continue
+        checkpoint_sha256 = sha256_file(checkpoint)
         if marker.exists():
             try:
                 marker_value = json.loads(marker.read_text(encoding="utf-8"))
-                if marker_value.get("checkpoint_sha256") != sha256_file(checkpoint):
+                if marker_value.get("checkpoint_sha256") != checkpoint_sha256:
                     errors.append(f"{run_id}: final-test marker checkpoint hash differs from best.pt")
                 if metrics.get("test_accuracy") in (None, ""):
                     errors.append(f"{run_id}: final-test marker exists but seed metric is empty")
+                if is_v6:
+                    try:
+                        _validate_v6_marker_test_source_record(
+                            marker_value,
+                            v6_test_source,
+                            label=f"{run_id}: final-test marker source",
+                        )
+                        _validate_v6_manifest_final_test_record(
+                            _load_v6_run_manifest(run_dir, label=run_id),
+                            v6_test_source,
+                            checkpoint_sha256=checkpoint_sha256,
+                            evaluated_at=marker_value.get("evaluated_at"),
+                            samples=marker_value.get("test_samples"),
+                            label=run_id,
+                        )
+                    except RuntimeError as exc:
+                        errors.append(str(exc))
             except Exception as exc:
                 errors.append(f"{run_id}: malformed final_test.json: {exc}")
         payload = load_checkpoint(checkpoint, map_location="cpu")
         config = _mapping(payload.get("config"), f"{run_id} checkpoint config")
+        if int(protocol.get("protocol_version", 1)) == 6:
+            try:
+                normalized = canonicalize_v6_artifact_run_mapping(
+                    config,
+                    protocol,
+                    project_root=PROJECT_ROOT,
+                )
+                resolved = validate_run_mapping(normalized, protocol)
+            except Exception as exc:
+                errors.append(f"{run_id}: checkpoint run contract is invalid: {exc}")
+                continue
+            if resolved.runtime.run_id != run_id:
+                errors.append(f"{run_id}: checkpoint run_id differs from its directory")
+            if resolved.config_hash != row.get("config_hash"):
+                errors.append(f"{run_id}: checkpoint config differs from the frozen matrix")
         analysis = config.get("analysis", {})
         analysis = analysis if isinstance(analysis, Mapping) else {}
         if analysis.get("protocol_hash") != protocol_hash:
@@ -327,7 +373,86 @@ def _audit_all_frozen(
         raise RuntimeError(f"Final-test freeze audit failed:\n{preview}{suffix}")
 
 
-def _test_source_record(config: Any) -> dict[str, Any]:
+def _v6_benchmark_binding_rows(
+    rows: list[dict[str, str]],
+    metrics_by_id: Mapping[str, Mapping[str, Any]],
+    results_root: Path,
+) -> list[dict[str, Any]]:
+    """Bind a V6 benchmark receipt to the actual formal checkpoint evidence."""
+
+    bindings: list[dict[str, Any]] = []
+    for row in rows:
+        run_id = row["run_id"]
+        metrics = metrics_by_id.get(run_id)
+        if not isinstance(metrics, Mapping):
+            raise RuntimeError(f"{run_id}: V6 benchmark binding has no audited metrics")
+        checkpoint = results_root / run_id / "best.pt"
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"{run_id}: V6 benchmark binding is missing best.pt")
+        bindings.append(
+            {
+                "run_id": run_id,
+                "checkpoint_sha256": sha256_file(checkpoint),
+                "config_hash": str(metrics.get("config_hash", "")),
+                "training_environment_sha256": str(
+                    metrics.get("training_environment_sha256", "")
+                ),
+                "split_manifest_sha256": str(metrics.get("split_manifest_sha256", "")),
+                "shared_weight_sha256": str(metrics.get("shared_weight_sha256", "")),
+            }
+        )
+    return bindings
+
+
+def _v6_cifar100_test_source_record(protocol: Mapping[str, Any]) -> dict[str, str]:
+    binding = validate_v6_cifar100_provenance_files(
+        protocol,
+        project_root=PROJECT_ROOT,
+    )
+    return {
+        "test_source": binding["cifar100_test_pickle"],
+        "test_source_sha256": binding["cifar100_test_pickle_sha256"],
+        **binding,
+    }
+
+
+_V6_FINAL_TEST_SOURCE_KEYS = frozenset(
+    {
+        "test_source",
+        "test_source_sha256",
+        "cifar100_source_provenance",
+        "cifar100_source_provenance_sha256",
+        "cifar100_test_pickle",
+        "cifar100_test_pickle_sha256",
+        "cifar100_split_manifest",
+        "cifar100_split_manifest_sha256",
+    }
+)
+
+
+def _require_v6_test_source_binding(value: Mapping[str, str] | None) -> Mapping[str, str]:
+    if value is None:
+        raise RuntimeError("V6 final-test audit requires a frozen CIFAR-100 source binding")
+    observed = set(value)
+    if observed != _V6_FINAL_TEST_SOURCE_KEYS:
+        raise RuntimeError(
+            "V6 final-test source binding has an invalid field set: "
+            f"missing={sorted(_V6_FINAL_TEST_SOURCE_KEYS - observed)}, "
+            f"extra={sorted(observed - _V6_FINAL_TEST_SOURCE_KEYS)}"
+        )
+    if any(not isinstance(value[key], str) or not value[key].strip() for key in value):
+        raise RuntimeError("V6 final-test source binding contains an empty or non-string value")
+    return value
+
+
+def _test_source_record(
+    config: Any,
+    protocol: Mapping[str, Any],
+) -> dict[str, Any]:
+    if int(protocol.get("protocol_version", 1)) == 6:
+        if config.data.dataset != "cifar100":
+            raise RuntimeError("V6 final-test source binding requires CIFAR-100")
+        return _v6_cifar100_test_source_record(protocol)
     if config.data.dataset != "cifar10dvs":
         return {
             "test_source": f"torchvision official {config.data.dataset} test partition",
@@ -346,6 +471,81 @@ def _test_source_record(config: Any) -> dict[str, Any]:
         ),
         "test_source_sha256": source_hash,
     }
+
+
+def _validate_v6_test_source_record(
+    observed: Any,
+    expected: Mapping[str, str],
+    *,
+    label: str,
+) -> None:
+    _require_v6_test_source_binding(expected)
+    if not isinstance(observed, Mapping) or dict(observed) != dict(expected):
+        raise RuntimeError(f"{label} differs from the frozen V6 CIFAR-100 test-source binding")
+
+
+def _validate_v6_marker_test_source_record(
+    marker: Any,
+    expected: Mapping[str, str],
+    *,
+    label: str,
+) -> None:
+    if not isinstance(marker, Mapping):
+        raise RuntimeError(f"{label} is not a JSON object")
+    _validate_v6_test_source_record(
+        {key: marker.get(key) for key in expected},
+        expected,
+        label=label,
+    )
+
+
+def _validate_v6_manifest_final_test_record(
+    manifest: Any,
+    expected_source: Mapping[str, str],
+    *,
+    checkpoint_sha256: str,
+    evaluated_at: Any,
+    samples: Any,
+    label: str,
+) -> None:
+    """Require a committed V6 manifest record to match its final-test receipt."""
+
+    if not isinstance(manifest, Mapping):
+        raise RuntimeError(f"{label} run manifest is not a JSON object")
+    final_test = manifest.get("final_test")
+    if not isinstance(final_test, Mapping):
+        raise RuntimeError(f"{label} run manifest has no committed final_test record")
+    expected_fields = {
+        "status": "complete",
+        "checkpoint": "best.pt",
+        "checkpoint_sha256": checkpoint_sha256,
+        "evaluated_at": evaluated_at,
+        "samples": samples,
+    }
+    mismatches = [
+        key for key, expected in expected_fields.items() if final_test.get(key) != expected
+    ]
+    if mismatches:
+        raise RuntimeError(
+            f"{label} run manifest final_test differs from its receipt at: "
+            + ", ".join(mismatches)
+        )
+    _validate_v6_test_source_record(
+        {key: final_test.get(key) for key in expected_source},
+        expected_source,
+        label=f"{label} run manifest final-test source",
+    )
+
+
+def _load_v6_run_manifest(run_dir: Path, *, label: str) -> Mapping[str, Any]:
+    path = run_dir / "run_manifest.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label} cannot read run manifest: {exc}") from exc
+    if not isinstance(value, Mapping):
+        raise RuntimeError(f"{label} run manifest is not a JSON object")
+    return value
 
 
 def _transaction_paths(run_dir: Path) -> tuple[Path, Path]:
@@ -405,12 +605,14 @@ def _commit_final_test(run_dir: Path, results_root: Path, journal: Mapping[str, 
 
     manifest_path = run_dir / "run_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    test_source = dict(_mapping(journal.get("test_source"), "transaction test source"))
     manifest["final_test"] = {
         "status": "complete",
         "checkpoint": "best.pt",
         "checkpoint_sha256": checkpoint_hash,
         "evaluated_at": evaluated_at,
         "samples": int(result["samples"]),
+        **test_source,
     }
     atomic_write_json(manifest_path, manifest)
 
@@ -437,14 +639,22 @@ def _commit_final_test(run_dir: Path, results_root: Path, journal: Mapping[str, 
         "test_loss": float(result["loss"]),
         "test_accuracy": float(result["accuracy"]),
         "test_samples": int(result["samples"]),
-        **dict(_mapping(journal.get("test_source"), "transaction test source")),
+        **test_source,
     }
     # This marker is the atomic commit record and is deliberately written last.
     atomic_write_json(run_dir / "final_test.json", marker)
     JSONLLogger(run_dir / "events.jsonl").log("final_test_completed", **marker)
 
 
-def _recover_one(run_dir: Path, results_root: Path, protocol_hash: str) -> str:
+def _recover_one(
+    run_dir: Path,
+    results_root: Path,
+    protocol_hash: str,
+    *,
+    v6_test_source: Mapping[str, str] | None = None,
+) -> str:
+    if v6_test_source is not None:
+        v6_test_source = _require_v6_test_source_binding(v6_test_source)
     journal_path, lock_path = _transaction_paths(run_dir)
     marker_path = run_dir / "final_test.json"
     if not journal_path.exists():
@@ -460,26 +670,94 @@ def _recover_one(run_dir: Path, results_root: Path, protocol_hash: str) -> str:
         raise RuntimeError(f"{run_dir.name}: journal does not match the current best.pt")
     if journal.get("protocol_hash") != protocol_hash:
         raise RuntimeError(f"{run_dir.name}: journal protocol hash differs from the frozen protocol")
+    if v6_test_source is not None:
+        _validate_v6_test_source_record(
+            journal.get("test_source"),
+            v6_test_source,
+            label=f"{run_dir.name}: final-test journal source",
+        )
     if marker_path.exists():
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         if marker.get("status") == "complete" and marker.get("checkpoint_sha256") == checkpoint_hash:
+            if v6_test_source is not None:
+                if journal.get("stage") != "results_ready":
+                    raise RuntimeError(
+                        f"{run_dir.name}: committed V6 marker has no results_ready journal"
+                    )
+                result = _mapping(journal.get("test"), "transaction test result")
+                if (
+                    marker.get("evaluated_at") != journal.get("evaluated_at")
+                    or marker.get("test_samples") != result.get("samples")
+                ):
+                    raise RuntimeError(
+                        f"{run_dir.name}: committed V6 marker differs from its transaction journal"
+                    )
+                _validate_v6_marker_test_source_record(
+                    marker,
+                    v6_test_source,
+                    label=f"{run_dir.name}: final-test marker source",
+                )
+                _validate_v6_manifest_final_test_record(
+                    _load_v6_run_manifest(run_dir, label=run_dir.name),
+                    v6_test_source,
+                    checkpoint_sha256=checkpoint_hash,
+                    evaluated_at=journal.get("evaluated_at"),
+                    samples=result.get("samples"),
+                    label=run_dir.name,
+                )
             _cleanup_transaction(run_dir)
             return "cleaned_committed_transaction"
         raise RuntimeError(f"{run_dir.name}: marker and transaction journal disagree")
     if journal.get("stage") != "results_ready":
         raise RuntimeError(f"{run_dir.name}: test access is ambiguous. {_recovery_instruction(run_dir.name)}")
+    if v6_test_source is not None:
+        manifest_path = run_dir / "run_manifest.json"
+        if manifest_path.exists():
+            manifest = _load_v6_run_manifest(run_dir, label=run_dir.name)
+            if "final_test" in manifest:
+                result = _mapping(journal.get("test"), "transaction test result")
+                _validate_v6_manifest_final_test_record(
+                    manifest,
+                    v6_test_source,
+                    checkpoint_sha256=checkpoint_hash,
+                    evaluated_at=journal.get("evaluated_at"),
+                    samples=result.get("samples"),
+                    label=run_dir.name,
+                )
     _commit_final_test(run_dir, results_root, journal)
     _cleanup_transaction(run_dir)
     return "recovered_without_test_access"
 
 
-def _evaluate_one(run_dir: Path, device_name: str, results_root: Path) -> str:
+def _evaluate_one(
+    run_dir: Path,
+    device_name: str,
+    results_root: Path,
+    protocol: Mapping[str, Any],
+    v6_test_source: Mapping[str, str] | None = None,
+) -> str:
+    if v6_test_source is not None:
+        v6_test_source = _require_v6_test_source_binding(v6_test_source)
     checkpoint_path = run_dir / "best.pt"
     checkpoint_hash = sha256_file(checkpoint_path)
     marker_path = run_dir / "final_test.json"
     if marker_path.exists():
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         if marker.get("checkpoint_sha256") == checkpoint_hash and marker.get("status") == "complete":
+            if v6_test_source is not None:
+                _validate_v6_marker_test_source_record(
+                    marker,
+                    v6_test_source,
+                    label=f"{run_dir.name}: final-test marker source",
+                )
+                _validate_v6_manifest_final_test_record(
+                    _load_v6_run_manifest(run_dir, label=run_dir.name),
+                    v6_test_source,
+                    checkpoint_sha256=checkpoint_hash,
+                    evaluated_at=marker.get("evaluated_at"),
+                    samples=marker.get("test_samples"),
+                    label=run_dir.name,
+                )
             return "already_complete"
         raise FileExistsError(f"{marker_path} belongs to a different checkpoint; refusing to overwrite")
     journal_path, lock_path = _transaction_paths(run_dir)
@@ -487,7 +765,16 @@ def _evaluate_one(run_dir: Path, device_name: str, results_root: Path) -> str:
         raise RuntimeError(f"{run_dir.name}: interrupted final test. {_recovery_instruction(run_dir.name)}")
 
     payload = load_checkpoint(checkpoint_path, map_location="cpu")
-    config = validate_run_mapping(_mapping(payload.get("config"), "checkpoint config"))
+    raw_config = _mapping(payload.get("config"), "checkpoint config")
+    if int(protocol.get("protocol_version", 1)) == 6:
+        normalized = canonicalize_v6_artifact_run_mapping(
+            raw_config,
+            protocol,
+            project_root=PROJECT_ROOT,
+        )
+        config = validate_run_mapping(normalized, protocol)
+    else:
+        config = validate_run_mapping(raw_config)
     if config.runtime.dry_run:
         raise RuntimeError(f"{run_dir.name}: dry-run checkpoints cannot be final-tested")
     if payload.get("config_hash") != config.config_hash:
@@ -516,8 +803,14 @@ def _evaluate_one(run_dir: Path, device_name: str, results_root: Path) -> str:
         "checkpoint_epoch_zero_based": int(payload["epoch"]),
         "started_at": utc_now(),
         "device": str(device),
-        "test_source": _test_source_record(config),
+        "test_source": _test_source_record(config, protocol),
     }
+    if v6_test_source is not None:
+        _validate_v6_test_source_record(
+            journal["test_source"],
+            v6_test_source,
+            label=f"{run_dir.name}: final-test source",
+        )
     journal_path, _ = _begin_transaction(run_dir, journal)
     test_access_started = False
     try:
@@ -587,7 +880,16 @@ def main(argv: list[str] | None = None) -> int:
     config_dir = Path(args.config_dir or default_configs).resolve()
     protocol_version = int(protocol.get("protocol_version", 1))
     expected_training_environment_sha256: str | None = None
-    if protocol_version in (3, 4, 5):
+    v6_test_source: dict[str, str] | None = None
+    if protocol_version == 6:
+        try:
+            v6_test_source = _v6_cifar100_test_source_record(protocol)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(
+                "V6 final-test blocked by CIFAR-100 source provenance: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+    if protocol_version in (3, 4, 5, 6):
         if results_root != default_results.resolve():
             raise SystemExit(
                 f"Protocol v{protocol_version} final test must use "
@@ -598,7 +900,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Protocol v{protocol_version} final test must use "
                 "artifact_paths.formal_matrix"
             )
-    if protocol_version in (4, 5):
+    if protocol_version in (4, 5, 6):
         freeze_manifest = verify_formal_freeze(
             project_root=PROJECT_ROOT,
             protocol_path=args.protocol,
@@ -628,20 +930,57 @@ def main(argv: list[str] | None = None) -> int:
         config_dir,
         expected_count=expected_run_count_for_protocol(protocol),
     )
-    _audit_consolidated_metrics(
+    metrics_by_id = _audit_consolidated_metrics(
         rows,
         results_root,
         recovery_run=args.recover_run,
         expected_training_environment_sha256=expected_training_environment_sha256,
     )
+    if protocol_version == 6:
+        protocol_path = Path(args.protocol)
+        protocol_path = (
+            protocol_path if protocol_path.is_absolute() else PROJECT_ROOT / protocol_path
+        ).resolve()
+        manifest_path = (PROJECT_ROOT / artifacts["freeze_manifest"]).resolve()
+        if not manifest_path.is_file():
+            raise SystemExit("V6 final-test blocked: the verified freeze manifest is missing")
+        try:
+            validate_v6_benchmark_receipt(
+                project_root=PROJECT_ROOT,
+                protocol=protocol,
+                protocol_path=protocol_path,
+                protocol_hash=report.protocol_hash,
+                expected_freeze_manifest_sha256=sha256_file(manifest_path),
+                expected_formal_rows=_v6_benchmark_binding_rows(
+                    rows,
+                    metrics_by_id,
+                    results_root,
+                ),
+            )
+        except (OSError, V6BenchmarkError, RuntimeError) as exc:
+            raise SystemExit(
+                "V6 final-test blocked by validation-only benchmark receipt: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     if args.recover_run:
         planned_ids = {row["run_id"] for row in rows}
         if args.recover_run not in planned_ids:
             raise SystemExit(f"Unknown planned run_id: {args.recover_run}")
-        status = _recover_one(results_root / args.recover_run, results_root, report.protocol_hash)
+        status = _recover_one(
+            results_root / args.recover_run,
+            results_root,
+            report.protocol_hash,
+            v6_test_source=v6_test_source,
+        )
         print(f"{args.recover_run}: {status}")
         return 0
-    _audit_all_frozen(rows, results_root, report.protocol_hash)
+    _audit_all_frozen(
+        rows,
+        results_root,
+        report.protocol_hash,
+        protocol,
+        v6_test_source=v6_test_source,
+    )
     pending = [row for row in rows if not (results_root / row["run_id"] / "final_test.json").exists()]
     if args.limit is not None:
         pending = pending[: args.limit]
@@ -649,7 +988,13 @@ def main(argv: list[str] | None = None) -> int:
     for index, row in enumerate(pending, start=1):
         run_dir = results_root / row["run_id"]
         try:
-            status = _evaluate_one(run_dir, args.device, results_root)
+            status = _evaluate_one(
+                run_dir,
+                args.device,
+                results_root,
+                protocol,
+                v6_test_source=v6_test_source,
+            )
             print(f"[{index}/{len(pending)}] {row['run_id']}: {status}")
         except Exception as exc:
             failures += 1

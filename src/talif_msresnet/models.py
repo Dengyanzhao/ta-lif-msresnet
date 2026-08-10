@@ -24,7 +24,15 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from .neurons import BaseNeuron, LIFNeuron, TALIFNeuron
+from .neurons import (
+    BaseNeuron,
+    LIFNeuron,
+    PLIFStyleNeuron,
+    RouteMatchedLIFNeuron,
+    SharedWindowTALIFNeuron,
+    TALIFNeuron,
+    TimeIndexedTALIFNeuron,
+)
 
 __all__ = [
     "CONDITIONS",
@@ -42,6 +50,18 @@ CONDITIONS: Dict[str, Tuple[str, str]] = {
     "C2": ("spiking_resnet", "ta_lif"),
     "C3": ("ms_resnet", "lif"),
     "C4": ("ms_resnet", "ta_lif"),
+}
+
+# Protocol v6 is a mechanism study rather than an extension of the historical
+# C1--C4 factorial.  Keep the maps separate so legacy callers that inspect
+# ``CONDITIONS`` retain their exact four-cell contract.
+V6_CONDITIONS: Dict[str, Tuple[str, str]] = {
+    "M0": ("spiking_resnet", "lif"),
+    "M1": ("spiking_resnet", "route_matched_lif"),
+    "M2": ("spiking_resnet", "shared_window_ta_lif"),
+    "M3": ("spiking_resnet", "time_indexed_ta_lif"),
+    "M4": ("spiking_resnet", "ta_lif"),
+    "PLIF": ("spiking_resnet", "plif_style"),
 }
 
 
@@ -67,9 +87,16 @@ def _normalise_neuron(value: str) -> str:
     key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
         "lif": "lif",
+        "route_matched_lif": "route_matched_lif",
+        "route_matched": "route_matched_lif",
+        "shared_window_ta_lif": "shared_window_ta_lif",
+        "shared_window": "shared_window_ta_lif",
+        "time_indexed_ta_lif": "time_indexed_ta_lif",
+        "time_indexed": "time_indexed_ta_lif",
         "ta_lif": "ta_lif",
         "talif": "ta_lif",
         "adaptive": "ta_lif",
+        "plif_style": "plif_style",
     }
     if key not in aliases:
         raise ValueError(f"unsupported neuron: {value!r}")
@@ -96,11 +123,17 @@ def _make_neuron_factory(
     threshold = float(cfg.get("threshold", cfg.get("v_threshold", cfg.get("v_th", 1.0))))
     v_rest = float(cfg.get("v_rest", 0.0))
     v_reset = float(cfg.get("v_reset", 0.0))
-    if kind == "lif":
+    if kind in {"lif", "route_matched_lif", "plif_style"}:
         surrogate_width = float(cfg.get("surrogate_width", cfg.get("width", 1.0)))
 
+        neuron_class = {
+            "lif": LIFNeuron,
+            "route_matched_lif": RouteMatchedLIFNeuron,
+            "plif_style": PLIFStyleNeuron,
+        }[kind]
+
         def make_lif() -> BaseNeuron:
-            return LIFNeuron(
+            return neuron_class(
                 tau=tau,
                 threshold=threshold,
                 surrogate_width=surrogate_width,
@@ -113,16 +146,24 @@ def _make_neuron_factory(
     width = float(cfg.get("width", cfg.get("surrogate_width", 1.0)))
     delta_min = float(cfg.get("delta_min", 1e-3))
 
+    neuron_class = {
+        "ta_lif": TALIFNeuron,
+        "shared_window_ta_lif": SharedWindowTALIFNeuron,
+        "time_indexed_ta_lif": TimeIndexedTALIFNeuron,
+    }[kind]
+
     def make_talif() -> BaseNeuron:
-        return TALIFNeuron(
-            steps=time_steps,
-            tau=tau,
-            threshold=threshold,
-            width=width,
-            delta_min=delta_min,
-            v_rest=v_rest,
-            v_reset=v_reset,
-        )
+        kwargs: Dict[str, Any] = {
+            "tau": tau,
+            "threshold": threshold,
+            "width": width,
+            "delta_min": delta_min,
+            "v_rest": v_rest,
+            "v_reset": v_reset,
+        }
+        if neuron_class is not SharedWindowTALIFNeuron:
+            kwargs["steps"] = time_steps
+        return neuron_class(**kwargs)
 
     return make_talif
 
@@ -604,12 +645,20 @@ def build_model(model_cfg: Mapping[str, Any]) -> CIFARSpikingResNet:
         topology = _normalise_topology(cfg.get("topology", "spiking_resnet"))
         neuron = _normalise_neuron(cfg.get("neuron", "lif"))
         reverse = {value: key for key, value in CONDITIONS.items()}
-        condition = reverse[(topology, neuron)]
+        key = (topology, neuron)
+        if key not in reverse:
+            raise ValueError(
+                "v6 mechanism neurons require an explicit M0--M4/PLIF condition"
+            )
+        condition = reverse[key]
     else:
         condition = str(condition_value).strip().upper()
-        if condition not in CONDITIONS:
-            raise ValueError(f"condition must be one of {sorted(CONDITIONS)}, got {condition!r}")
-        expected_topology, expected_neuron = CONDITIONS[condition]
+        condition_map = {**CONDITIONS, **V6_CONDITIONS}
+        if condition not in condition_map:
+            raise ValueError(
+                f"condition must be one of {sorted(condition_map)}, got {condition!r}"
+            )
+        expected_topology, expected_neuron = condition_map[condition]
         topology = _normalise_topology(cfg.get("topology", expected_topology))
         neuron = _normalise_neuron(cfg.get("neuron", expected_neuron))
         if topology != expected_topology or neuron != expected_neuron:

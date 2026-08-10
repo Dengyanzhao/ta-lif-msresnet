@@ -488,6 +488,7 @@ def _install_evaluate_stubs(
         "artifact_paths": {
             "formal_results": "results/formal",
             "formal_matrix": "configs/formal",
+            "freeze_manifest": "FREEZE_MANIFEST.json",
         },
     }
     (tmp_path / "results" / "formal").mkdir(parents=True)
@@ -537,11 +538,32 @@ def _install_evaluate_stubs(
         ),
     )
     monkeypatch.setattr(evaluate_tool, "_audit_all_frozen", lambda *_args, **_kwargs: None)
+    if version == 6:
+        (tmp_path / "FREEZE_MANIFEST.json").write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(
+            evaluate_tool,
+            "_v6_cifar100_test_source_record",
+            lambda _protocol: {
+                "test_source": "data/cifar100/cifar-100-python/test",
+                "test_source_sha256": "a" * 64,
+                "cifar100_source_provenance": "environment/CIFAR100_SOURCE_PROVENANCE.json",
+                "cifar100_source_provenance_sha256": "b" * 64,
+                "cifar100_test_pickle": "data/cifar100/cifar-100-python/test",
+                "cifar100_test_pickle_sha256": "a" * 64,
+                "cifar100_split_manifest": "data/manifests/cifar100_seed2024.json",
+                "cifar100_split_manifest_sha256": "c" * 64,
+            },
+        )
+        monkeypatch.setattr(
+            evaluate_tool,
+            "validate_v6_benchmark_receipt",
+            lambda **_kwargs: calls.append("benchmark") or {},
+        )
     return calls
 
 
-@pytest.mark.parametrize("version", (4, 5))
-def test_evaluate_checkpoints_v4_v5_share_freeze_and_environment_gate(
+@pytest.mark.parametrize("version", (4, 5, 6))
+def test_evaluate_checkpoints_v4_v5_v6_share_freeze_and_environment_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     version: int,
@@ -549,6 +571,31 @@ def test_evaluate_checkpoints_v4_v5_share_freeze_and_environment_gate(
     calls = _install_evaluate_stubs(monkeypatch, tmp_path, version=version)
 
     assert evaluate_tool.main(["--protocol", str(tmp_path / "protocol.yaml")]) == 0
+    expected = [
+        "freeze",
+        "evidence",
+        "read_expected",
+        f"audit:{'e' * 64}",
+    ]
+    if version == 6:
+        expected.append("benchmark")
+    assert calls == expected
+
+
+def test_evaluate_checkpoints_v6_blocks_test_access_without_benchmark_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _install_evaluate_stubs(monkeypatch, tmp_path, version=6)
+    monkeypatch.setattr(
+        evaluate_tool,
+        "validate_v6_benchmark_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            evaluate_tool.V6BenchmarkError("receipt is missing")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="benchmark receipt"):
+        evaluate_tool.main(["--protocol", str(tmp_path / "protocol.yaml")])
     assert calls == [
         "freeze",
         "evidence",

@@ -572,7 +572,7 @@ def test_dvs_test_source_uses_index_hash_for_external_directory(tmp_path: Path) 
         data=SimpleNamespace(dataset="cifar10dvs", test_frames_path=str(source))
     )
 
-    record = final_eval._test_source_record(config)
+    record = final_eval._test_source_record(config, {"protocol_version": 5})
 
     assert record["test_source"] == (
         f"external:index-sha256:{sha256_file(index)}"

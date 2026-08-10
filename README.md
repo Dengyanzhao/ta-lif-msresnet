@@ -131,6 +131,11 @@ Files for v1-v4 and the earlier C1-C4 factorial route are retained only for
 incident history, auditability, and protocol provenance. They are not current
 execution instructions and must not be combined with the V5 results.
 
+For the V3/V4 historical record, the V3 CIFAR-100 pilot failed. Protocol V4 is
+now frozen in that archived record, while formal V4 remains blocked until both
+dataset pilots meet its then-applicable release gates. Later V5 and V6 work does
+not reopen or reinterpret that historical decision.
+
 ## Citation and license
 
 The software is released under the MIT License; the ownership decision is

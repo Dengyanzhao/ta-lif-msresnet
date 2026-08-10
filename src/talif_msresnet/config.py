@@ -1053,7 +1053,7 @@ def canonical_json(value: Any) -> str:
 def active_conditions_for_protocol(protocol: Mapping[str, Any]) -> Tuple[str, ...]:
     """Return the ordered condition set without changing legacy global support."""
 
-    if int(protocol.get("protocol_version", 1)) in (3, 4, 5):
+    if int(protocol.get("protocol_version", 1)) in (3, 4, 5, 6):
         values = protocol.get("active_conditions", ())
         if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
             raise ConfigError("active_conditions must be a sequence")
@@ -1071,6 +1071,10 @@ def confirmation_fields_for_protocol(protocol: Mapping[str, Any]) -> Tuple[str, 
         return V4_PROTOCOL_CONFIRMATION_FIELDS
     if version == 5:
         return V5_PROTOCOL_CONFIRMATION_FIELDS
+    if version == 6:
+        from .config_v6 import V6_PROTOCOL_CONFIRMATION_FIELDS
+
+        return V6_PROTOCOL_CONFIRMATION_FIELDS
     return PROTOCOL_CONFIRMATION_FIELDS
 
 
@@ -1078,7 +1082,7 @@ def artifact_paths_for_protocol(protocol: Mapping[str, Any]) -> Dict[str, str]:
     """Resolve isolated TA-LIF artifacts while preserving legacy path defaults."""
 
     version = int(protocol.get("protocol_version", 1))
-    if version in (3, 4, 5):
+    if version in (3, 4, 5, 6):
         value = protocol.get("artifact_paths")
         if not isinstance(value, Mapping):
             raise ConfigError(
@@ -1289,6 +1293,11 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
     """
 
     raw = _check_mapping(raw, "protocol")
+    raw_version = raw.get("protocol_version", 1)
+    if raw_version == 6:
+        from .config_v6 import validate_v6_protocol
+
+        return validate_v6_protocol(raw)
     allowed = {
         "protocol_version", "seeds", "output_root", "data", "datasets", "model",
         "optimizer", "runtime", "matrix", "experiments", "conditions", "analysis",
@@ -2288,6 +2297,14 @@ def validate_run_mapping(raw: Mapping[str, Any], protocol: Mapping[str, Any] | N
     """Resolve one run mapping and reject unknown keys at every section."""
 
     raw = _check_mapping(raw, "run")
+    raw_version = raw.get(
+        "protocol_version",
+        protocol.get("protocol_version", 1) if protocol is not None else 1,
+    )
+    if raw_version == 6:
+        from .config_v6 import validate_v6_run_mapping
+
+        return validate_v6_run_mapping(raw, protocol)
     allowed = {
         "protocol_version", "experiment", "condition", "run_id", "data", "dataset", "model",
         "optimizer", "runtime", "seed", "final_test", "analysis",
@@ -2387,6 +2404,10 @@ def generate_run_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """Generate the versioned active-condition matrix without mixing generations."""
 
     protocol = validate_protocol(protocol)
+    if protocol["protocol_version"] == 6:
+        from .config_v6 import generate_v6_formal_matrix
+
+        return generate_v6_formal_matrix(protocol)
     protocol_hash = hashlib.sha256(canonical_json(protocol).encode()).hexdigest()
     active_conditions = active_conditions_for_protocol(protocol)
     runs: List[Dict[str, Any]] = []

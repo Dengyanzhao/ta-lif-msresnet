@@ -1,0 +1,364 @@
+protocol_version: 6
+study_profile: cifar100_mechanism_core
+study_stage: health_pilot_formal
+active_conditions: [M0, M1, M2, M3, M4, PLIF]
+seeds:
+  - 1587277406
+  - 187544621
+  - 990604905
+  - 969985360
+  - 1718581689
+  - 465608478
+  - 1670924910
+  - 1825076945
+output_root: results/formal_v6_mechanism
+
+artifact_paths:
+  protocol: configs/protocol_v6_mechanism.yaml
+  signoff: PREREGISTRATION_SIGNOFF_V6_MECHANISM.md
+  formal_matrix: configs/v6_mechanism_generated
+  pilot_matrix: configs/v6_mechanism_pilot_generated
+  freeze_manifest: FREEZE_MANIFEST_V6_MECHANISM.json
+  formal_results: results/formal_v6_mechanism
+  pilot_results: results/pilot/v6_mechanism
+  analysis_results: results/analysis/v6_mechanism
+  benchmark_results: results/benchmark/v6_mechanism
+
+protocol_status:
+  frozen: true
+  confirmed_by: Yanzhao Deng (accountable author and Codex task user)
+  confirmed_at: "2026-08-10T22:26:50+08:00"
+  notes: >-
+    On 2026-08-10 the accountable author instructed Codex to complete all
+    prerequisites for the supplementary mechanism study and authorized the
+    frozen design before renting a new RTX 5090 instance. V5 release v1.0.0,
+    DOI 10.5281/zenodo.21808938, its consumed test access, and all V5 evidence
+    remain immutable. V6 uses new health, pilot, formal, bootstrap, benchmark,
+    output, release, and archive identities. A new instance is treated as a
+    blank environment and may resume a run only from last.pt in the identical
+    recorded training environment.
+  confirmations:
+    v5_evidence_remains_immutable_and_out_of_scope: true
+    six_condition_mechanism_design: true
+    condition_level_confound_audit: true
+    plif_style_parameterization_and_optimizer_policy: true
+    time_index_definition_k_equals_min_t_tminus1: true
+    paired_seed_and_shared_initialization_design: true
+    health_pilot_and_formal_run_handling: true
+    holm_family_equivalence_and_wording_gates: true
+    conditional_cifar10_extension: true
+    validation_only_benchmark_and_one_time_test_access: true
+
+seed_ledger:
+  namespace: ta-lif-msresnet/v6-mechanism-study/2026-08-10
+  algorithm: sha256_first_eight_bytes_big_endian_mask_positive_31_bit
+  collision_policy: reject_zero_historical_or_previous_then_increment_decimal_counter
+  historical_seed_policy: all_v1_to_v5_health_pilot_formal_bootstrap_and_development_seeds_excluded
+  records:
+    - {label: 'health|cifar100|1', counter: 0, input_sha256: c6592bb565c2bf133f795bfb83603717556711ea26a61a877ae53ba1c14ceb99, value: 1707261715}
+    - {label: 'pilot|cifar100|1', counter: 0, input_sha256: 51acf2a08150bc5a63b33271abd3cb17c843c4c4d48efdaff40f5e004aca6645, value: 22068314}
+    - {label: 'formal|cifar100|1', counter: 0, input_sha256: 699fccaade9bee5e921e0aa8cad98c466a4d5e36e6f199e7a746f23920ea6c19, value: 1587277406}
+    - {label: 'formal|cifar100|2', counter: 0, input_sha256: e5fc336d0b2db42da7b984880917f9a835b48fe100b0b76869ffa3c66dcb50ed, value: 187544621}
+    - {label: 'formal|cifar100|3', counter: 0, input_sha256: 93bca50abb0b6e696c38c09f033f860bbcabb76f1013f7115cd0c5b92938f9e8, value: 990604905}
+    - {label: 'formal|cifar100|4', counter: 0, input_sha256: 0d542967b9d0cd508816c90acb42eb6b2d430f4068d65c0faefaa9cde188b7a1, value: 969985360}
+    - {label: 'formal|cifar100|5', counter: 0, input_sha256: 75fe7e18e66f79b9500486a8dc6d71ea76d42998e4ff9388e1fc709f6cf57cef, value: 1718581689}
+    - {label: 'formal|cifar100|6', counter: 0, input_sha256: ba255bab9bc09f1e7336a2adf3e904ba2f4b505a1f30b42968e3e3a1962fede8, value: 465608478}
+    - {label: 'formal|cifar100|7', counter: 0, input_sha256: 250bbd7063984a6e661f5009534b447f353ebf643e6191881d30ddb87711c05c, value: 1670924910}
+    - {label: 'formal|cifar100|8', counter: 0, input_sha256: f255ff3a6cc876d1cc3e20dacc6b1abe6c3346a41952b909fba5da930aa8c463, value: 1825076945}
+    - {label: 'bootstrap|cifar100|m4-m0', counter: 0, input_sha256: 819d66af4340b73ab9c0142e9e72ad052fb85f1cda7319d9a75a70af91eacfe9, value: 1128314682}
+    - {label: 'bootstrap|cifar100|m4-m2', counter: 0, input_sha256: 4dbcab6c83e07fc76f69b2fec9f21c2826b38dfca79051450221cdc97d05b7c9, value: 65044423}
+    - {label: 'bootstrap|cifar100|m4-m3', counter: 0, input_sha256: d5d2f3c52e2d384c5bf5723b2590abbee126b6a204c5ebc0e72acc52ef65ef42, value: 774715468}
+    - {label: 'bootstrap|cifar100|m1-m0', counter: 0, input_sha256: d3f537399e4a5c5bb6392735f1120a10a4b331d671fb0823ecc869b628e7f0e7, value: 508189787}
+    - {label: 'bootstrap|cifar100|plif-m0', counter: 0, input_sha256: c223678cf4a0540a5e3f2b6450f05495214fc6f3ce0bd27ab8d8c0619d8b3402, value: 1956664330}
+    - {label: 'bootstrap|cifar100|m4-plif', counter: 0, input_sha256: e49efc7995e22ed43ffec2f63a75c1275018c41ba8293cddded43c51ac4b04dd, value: 367144660}
+    - {label: 'benchmark|cifar100|1', counter: 0, input_sha256: 49ee9500c5b2e5a9363acaee50daaeb685143578ae19b7c3f9340c9e9004380a, value: 1169352105}
+    - {label: 'health|cifar10|1', counter: 0, input_sha256: d70f6b5f5ba418a988d42608f26cda466f0f9702b764e9b0b517083ce5c3b56a, value: 1537480873}
+    - {label: 'pilot|cifar10|1', counter: 0, input_sha256: c772099b7a15f0c2d244e94d9792c0141d9946ab942a78b74a47e60e98b66723, value: 2048258242}
+    - {label: 'formal|cifar10|1', counter: 0, input_sha256: a075459b2edfbba35a7802ab2c5bcdfec339b3983de767d167b78c5ee6a3c91f, value: 786414499}
+    - {label: 'formal|cifar10|2', counter: 0, input_sha256: 61783b75e4d68a57ed7076ae97400b50408d96e032b56eee3674aebef265472b, value: 1691781719}
+    - {label: 'formal|cifar10|3', counter: 0, input_sha256: 112f0e12357e81b87fa4b2f0abf9a635d44eba96f8b591945d676317ae2aed53, value: 897483192}
+    - {label: 'formal|cifar10|4', counter: 0, input_sha256: 5a0973f4ff725a472624f97cb865972d5af78348c2aabc6005282dd35d790cd5, value: 2138200647}
+    - {label: 'formal|cifar10|5', counter: 0, input_sha256: 2ed0d79be1d78c3d1e49736bb926ac3732b0f5bb54c3ca6a9273dc3615a88c91, value: 1641516093}
+    - {label: 'bootstrap|cifar10|m4-m0', counter: 0, input_sha256: 6afac5906bfc9b6357aa7361a68cff17197c9d346dbadf6cecfae2f046b5ea13, value: 1811716963}
+    - {label: 'bootstrap|cifar10|m4-m3', counter: 0, input_sha256: c5a90db7439a4b00046f94838e8cff8477cf4d6273f0975387ead22859b4e41b, value: 1134185216}
+    - {label: 'benchmark|cifar10|1', counter: 0, input_sha256: 53eac230024b2d0fc97c5253dd8957116cbceee272eeb6d00a083889b916e7dd, value: 38481167}
+
+pilot_acceptance:
+  identity: v6_cifar100_six_condition_e120_mechanism
+  artifact_class: non_reportable_pilot
+  dataset: cifar100
+  conditions: [M0, M1, M2, M3, M4, PLIF]
+  health_seed: 1707261715
+  pilot_seed: 22068314
+  health_output: results/pilot/v6_mechanism/health_cifar100_s1707261715.json
+  attempt_receipt: results/pilot/v6_mechanism/health_cifar100_s1707261715.attempt.json
+  pilot_output_root: results/pilot/v6_mechanism/cifar100_s22068314
+  pilot_plan: environment/v6_mechanism_pilot_cifar100_s22068314.json
+  validation_output: results/pilot/v6_mechanism/validation.json
+  environment:
+    expected_gpu_substring: RTX 5090
+    pytorch_version: 2.9.1+cu128
+    torchvision_version: 0.24.1+cu128
+    cuda_runtime: '12.8'
+    precision: float32
+    deterministic: true
+    cublas_workspace_config: ':4096:8'
+  health:
+    decision_basis: mechanism_gradient_state_resume_and_numerical_integrity
+    performance_thresholds: none
+    fixed_batch_size: 8
+    fixed_batch_steps: 80
+    schedule_epochs: 6
+    train_batches_per_epoch: 16
+    validation_batches_per_epoch: 4
+    required_ta_activation_epoch_zero_based: 5
+    required_checkpoint_resume_boundary: epoch_4_to_epoch_5_zero_based
+    all_conditions_required: true
+    nonfinite_tolerance: 0
+  pilot:
+    epochs: 120
+    all_six_conditions_required: true
+    required_best_checkpoint: true
+    required_finite_metrics: true
+    required_gradient_coverage: 0.95
+    minimum_best_validation_accuracy: 0.20
+    late_window_epochs: 10
+    minimum_late_to_best_ratio: 0.75
+    comparative_performance_role: non_reportable_no_model_selection
+  run_handling:
+    technical_interruption_policy: same_environment_last_checkpoint_resume_permitted
+    cross_environment_resume: forbidden
+    failed_or_interrupted_fresh_retry: forbidden
+    failure_action: new_protocol_version_and_new_unused_seed
+
+data:
+  root: data
+  val_fraction: 0.1
+  split_seed: 2024
+  split_manifest: data/manifests/{dataset}_seed{split_seed}.json
+  normalize: true
+  augment: true
+  autoaugment: false
+  download: true
+  num_workers: 0
+  pin_memory: true
+
+datasets:
+  cifar100:
+    dataset: cifar100
+    root: data/cifar100
+    num_classes: 100
+    in_channels: 3
+
+cifar100_provenance:
+  source_provenance_path: environment/CIFAR100_SOURCE_PROVENANCE.json
+  source_provenance_schema: cifar100-source-provenance-v1
+  source_provenance_sha256: 32f1bfe88102f728f969499399790e678b4ade5602bfef72706069a1a84d5c45
+  test_pickle_path: data/cifar100/cifar-100-python/test
+  test_pickle_bytes: 31049707
+  test_pickle_sha256: 4b67687d9933c4db8f0831104447f15b93774f4f464bd0516f0f0f2ac83b7864
+  split_manifest_path: data/manifests/cifar100_seed2024.json
+  split_manifest_sha256: ade5f378ea8864b8c36711c4c3bc0e4e7016adb1eaded30d2dc5cf7b0d998f26
+
+conditions:
+  M0: {topology: spiking_resnet, neuron: lif}
+  M1: {topology: spiking_resnet, neuron: route_matched_lif}
+  M2: {topology: spiking_resnet, neuron: shared_window_ta_lif}
+  M3: {topology: spiking_resnet, neuron: time_indexed_ta_lif}
+  M4: {topology: spiking_resnet, neuron: ta_lif}
+  PLIF: {topology: spiking_resnet, neuron: plif_style}
+
+model:
+  base_channels: 16
+  terminal_neuron_mode: topology_required
+  neuron_cfg:
+    tau: 0.5
+    threshold: 1.0
+    v_rest: 0.0
+    v_reset: 0.0
+    width: 1.0
+    delta_min: 0.05
+
+optimizer:
+  epochs: 120
+  batch_size: 64
+  lr: 0.025
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [75, 90, 105]
+  gamma: 0.1
+  ta_start_fraction: 0.041666666666666664
+  ta_lr_scale: 0.1
+  ta_weight_decay: 0.0
+  grad_clip: 1.0
+  warmup_epochs: 5
+  exclude_norm_and_bias_from_weight_decay: true
+  label_smoothing: 0.0
+  cutmix_alpha: 0.0
+  cutmix_probability: 0.0
+
+runtime:
+  device: auto
+  checkpoint_every: 1
+  log_every: 100
+  amp: false
+  deterministic: true
+  dry_run: false
+  limit_batches: null
+  resume: null
+
+experiments:
+  E6: paired six-condition CIFAR-100 mechanism study
+  E7: prespecified paired mechanism analysis
+  E8: validation-only descriptive resource audit
+
+analysis:
+  collect_activity: false
+  accuracy_scale: proportion
+  validation_accuracy_thresholds: {cifar100: 0.20}
+  final_outcome: independent_test_accuracy_of_validation_selected_best_checkpoint
+  pairing_unit: seed_with_shared_conv_bn_classifier_initialization
+  complete_block_rule: all_six_conditions_required_no_partial_analysis
+  alpha: 0.05
+  confidence_level: 0.95
+  sesoi_pp: 0.50
+  replication:
+    contrast: M4-M0
+    role: confirmatory_independent_replication_of_v5_cifar100_direction
+    test: one_sided_paired_t_greater
+    decision_rule: p_lt_0_05_and_mean_delta_gt_0
+    cannot_be_rescued_by_other_contrasts: true
+  holm_family:
+    contrasts: [M4-M2, M4-M3]
+    hypotheses:
+      - count_indexed_bank_outperforms_shared_trainable_window
+      - count_indexed_bank_outperforms_time_indexed_bank
+    tests: one_sided_seed_paired_t_greater
+    familywise_alpha: 0.05
+    method: holm_step_down
+    ordered_thresholds: [0.025, 0.05]
+    direct_contrast_required: true
+    significance_vs_nonsignificance_comparison: forbidden
+  secondary_contrasts:
+    M1-M0: gradient_route_contribution_estimate
+    PLIF-M0: generic_learnable_decay_baseline_estimate
+    M4-PLIF: full_talif_vs_learnable_decay_estimate
+  secondary_branching:
+    route_positive_evidence: m1_minus_m0_two_sided_95ci_lower_gt_0_and_mean_ge_0_50pp
+    route_practical_equivalence: m1_minus_m0_tost_alpha_0_05_within_plus_minus_0_50pp
+    otherwise: route_contribution_inconclusive
+    secondary_evidence_cannot_rescue_holm_family: true
+  equivalence:
+    method: paired_tost
+    alpha: 0.05
+    bounds_pp: [-0.50, 0.50]
+    interval: two_sided_90_percent_t
+    decision_rule: both_one_sided_tests_reject
+    nonsignificant_difference_is_not_equivalence: true
+  sign_flip:
+    assignments: 256
+    enumeration: all_2_power_8_seed_level_sign_flips
+    role: sensitivity_only_cannot_rescue_prespecified_t_tests
+  bootstrap:
+    resamples: 10000
+    resampling_unit: complete_six_condition_seed_block
+    rng: numpy_generator_pcg64
+    interval: two_sided_95_percent_percentile
+    quantile_method: linear
+    seeds:
+      M4-M0: 1128314682
+      M4-M2: 65044423
+      M4-M3: 774715468
+      M1-M0: 508189787
+      PLIF-M0: 1956664330
+      M4-PLIF: 367144660
+    role: sensitivity_only
+  power_planning:
+    paired_seed_count: 8
+    one_sided_family_worst_case_alpha: 0.025
+    power: 0.80
+    reference_sd_pp: 0.3844867
+    reference_mdes_pp: 0.444
+    sensitivity_sd_pp: [0.50, 0.75, 1.00]
+    prospective_not_posthoc_power_claim: true
+  model_selection:
+    checkpoint: best.pt
+    primary_order: maximum_validation_accuracy
+    first_tie_breaker: minimum_validation_loss
+    exact_tie_breaker: earliest_epoch
+    test_based_selection: forbidden
+  test_access:
+    training_config_final_test: false
+    when: after_all_48_runs_and_best_checkpoints_pass_frozen_audit
+    access_count_per_checkpoint: 1
+    reselection_or_repeated_evaluation: forbidden
+    ambiguous_interruption: stop_document_and_obtain_author_decision
+  run_handling:
+    health_and_pilot_in_reportable_analysis: forbidden
+    failed_run_records: retain
+    seed_substitution: forbidden
+    outlier_exclusion: forbidden
+    incomplete_seed_block: unresolved_no_partial_confirmatory_analysis
+    cross_environment_checkpoint_resume: forbidden
+    protocol_change_after_first_reportable_run: forbidden
+  wording_gates:
+    mechanism_supported: both_holm_contrasts_reject_positive_and_replication_passes
+    partial_mechanism_support: exactly_one_holm_contrast_rejects_positive_and_replication_passes
+    mechanism_inconclusive: neither_holm_contrast_rejects
+    equivalence_requires_tost: true
+    route_contribution_requires_secondary_branch_rule: true
+    plif_style_not_exact_fang_plif: true
+  efficiency:
+    role: descriptive_only
+    metrics:
+      - parameter_count
+      - cuda_latency_b1
+      - cuda_latency_b128
+      - peak_memory
+      - spike_rate
+      - synaptic_operation_proxy
+    validation_only_input: true
+    energy: not_measured_no_energy_claim
+
+benchmark:
+  role: descriptive_activity_and_operation_proxy_not_measured_energy
+  dataset_partition: validation_only_never_test
+  device_type: cuda
+  precision: float32
+  batch_sizes: [1, 128]
+  warmup_iterations: 25
+  timed_iterations: 100
+  timing_method: synchronized_cuda_events
+  input_residency: preloaded_on_device_before_warmup_and_timing
+  input_seed: 1169352105
+  checkpoint_scope: all_48_frozen_best_checkpoints
+  energy_claim: forbidden
+
+matrix:
+  primary:
+    - experiment: E6
+      dataset: cifar100
+      depth: 20
+      time_steps: 6
+      seeds: [1587277406, 187544621, 990604905, 969985360, 1718581689, 465608478, 1670924910, 1825076945]
+
+conditional_extension:
+  status: preregistered_inactive_until_core_gate_receipt_passes
+  dataset: cifar10
+  scientific_role: static_modality_boundary_triangulation_not_causal_modality_test
+  conditions: [M0, M3, M4]
+  depth: 20
+  time_steps: 6
+  formal_seeds: [786414499, 1691781719, 897483192, 2138200647, 1641516093]
+  health_seed: 1537480873
+  pilot_seed: 2048258242
+  bootstrap_seeds: {M4-M0: 1811716963, M4-M3: 1134185216}
+  benchmark_seed: 38481167
+  activation_gate:
+    core_integrity_status: PASS
+    m4_minus_m0_replication: pass_one_sided_p_lt_0_05_and_mean_gt_0
+    holm_mechanism_requirement: at_least_one_positive_holm_rejection
+    manual_condition_selection_after_results: forbidden
+  run_count: 15
+  new_freeze_manifest_required: true
+  results_root: results/formal_v6_cifar10_boundary

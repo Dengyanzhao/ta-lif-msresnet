@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections import Counter
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -57,6 +58,21 @@ def _check_dependencies(names: Sequence[str]) -> list[str]:
         except Exception as exc:
             missing.append(f"Python dependency {name!r} is unavailable: {type(exc).__name__}: {exc}")
     return missing
+
+
+def _check_v6_torchvision_version(protocol: Mapping[str, Any]) -> list[str]:
+    acceptance = protocol.get("pilot_acceptance")
+    environment = acceptance.get("environment") if isinstance(acceptance, Mapping) else None
+    expected = environment.get("torchvision_version") if isinstance(environment, Mapping) else None
+    if not isinstance(expected, str) or not expected:
+        return ["V6 pilot_acceptance.environment.torchvision_version must be frozen"]
+    try:
+        observed = distribution_version("torchvision")
+    except PackageNotFoundError:
+        return ["V6 requires an installed torchvision distribution"]
+    if observed != expected:
+        return [f"V6 torchvision version mismatch: {observed!r} != {expected!r}"]
+    return []
 
 
 def _resolve(project_root: Path, value: Any) -> Path | None:
@@ -401,11 +417,29 @@ def check_protocol(
     errors: list[str] = []
     warnings: list[str] = []
 
+    if protocol_version == 6:
+        from .config_v6 import validate_v6_protocol
+
+        try:
+            protocol = validate_v6_protocol(protocol)
+        except ValueError as exc:
+            errors.append(f"V6 protocol contract failed: {exc}")
+
     if check_dependencies:
         required = ("yaml", "numpy", "torch", "torchvision")
         if mode in {"pilot", "full", "final-test"}:
             required += ("pandas", "scipy", "statsmodels")
         errors.extend(_check_dependencies(required))
+        if protocol_version == 6 and mode in {"pilot", "full", "final-test"}:
+            errors.extend(_check_v6_torchvision_version(protocol))
+
+    if protocol_version == 6 and mode in {"full", "final-test"}:
+        from .config_v6 import validate_v6_cifar100_provenance_files
+
+        try:
+            validate_v6_cifar100_provenance_files(protocol, project_root=root)
+        except ValueError as exc:
+            errors.append(f"V6 CIFAR-100 provenance gate failed: {exc}")
 
     status = protocol.get("protocol_status", {})
     if not isinstance(status, Mapping):
@@ -419,7 +453,7 @@ def check_protocol(
     # v4/v5 Phase A is an executable author freeze for health/pilot work. Older
     # pilot protocols intentionally retain their historical unfrozen behavior.
     author_freeze_required = mode in {"full", "final-test"} or (
-        protocol_version in (4, 5) and mode == "pilot"
+        protocol_version in (4, 5, 6) and mode == "pilot"
     )
     if author_freeze_required:
         if status.get("frozen") is not True:
@@ -472,7 +506,7 @@ def check_protocol(
                     "analysis.bootstrap must define the fixed 10000-resample "
                     f"TA-LIF-only v{protocol_version} contract"
                 )
-        else:
+        elif protocol_version not in (6,):
             if analysis.get("interaction_practical_threshold_pp") is None:
                 errors.append("analysis.interaction_practical_threshold_pp must be frozen")
             margins = analysis.get("efficiency_noninferiority_margins", {})

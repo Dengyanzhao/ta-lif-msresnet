@@ -742,6 +742,7 @@ def test_run_gate_samples_gpu_immediately_before_cuda_timing(
     monkeypatch.setattr(gate, "run_condition_health", fake_condition_health)
     monkeypatch.setattr(gate.gc, "collect", lambda: 0)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.Tensor, "to", lambda tensor, *_args, **_kwargs: tensor)
     monkeypatch.setattr(gate, "gpu_idle_precheck", lambda _device: events.append("idle") or idle)
     monkeypatch.setattr(
         gate,

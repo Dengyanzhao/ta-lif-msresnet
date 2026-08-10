@@ -13,6 +13,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Sequence
 
@@ -265,11 +266,16 @@ def environment_manifest() -> Dict[str, Any]:
     cuda_device = None
     if torch.cuda.is_available():
         cuda_device = torch.cuda.get_device_name(torch.cuda.current_device())
+    try:
+        torchvision_version: str | None = distribution_version("torchvision")
+    except PackageNotFoundError:
+        torchvision_version = None
     return {
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "pytorch": torch.__version__,
+        "torchvision": torchvision_version,
         "numpy": np.__version__,
         "cuda_available": torch.cuda.is_available(),
         "cuda_version": torch.version.cuda,

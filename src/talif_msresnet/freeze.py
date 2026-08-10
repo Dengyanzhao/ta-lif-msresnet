@@ -7,7 +7,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
 
-from .config import artifact_paths_for_protocol, load_protocol
+from .config import (
+    active_conditions_for_protocol,
+    artifact_paths_for_protocol,
+    load_protocol,
+)
 
 
 V4_GATE_SOURCE_PATHS = frozenset(
@@ -37,6 +41,32 @@ V5_GATE_SOURCE_PATHS = frozenset(
         "scripts/pilot_health_gate_v5.py",
         "scripts/validate_v3_pilot.py",
         "scripts/validate_v5_pilot.py",
+    }
+)
+V6_GATE_SOURCE_PATHS = frozenset(
+    {
+        "src/talif_msresnet/benchmark.py",
+        "src/talif_msresnet/benchmark_v6.py",
+        "src/talif_msresnet/config_v6.py",
+        "src/talif_msresnet/models.py",
+        "src/talif_msresnet/neurons.py",
+        "src/talif_msresnet/pathing.py",
+        "src/talif_msresnet/pilot_v3.py",
+        "src/talif_msresnet/pilot_v6.py",
+        "src/talif_msresnet/utils.py",
+        "src/talif_msresnet/v6_statistics.py",
+        "scripts/analyze_v6_results.py",
+        "scripts/archive_v6_evidence.py",
+        "scripts/benchmark_checkpoint.py",
+        "scripts/export_v6_validation_batch.py",
+        "scripts/evaluate_checkpoints.py",
+        "scripts/pilot_health_gate.py",
+        "scripts/pilot_health_gate_v3.py",
+        "scripts/pilot_health_gate_v6.py",
+        "scripts/run_benchmarks.py",
+        "scripts/run_v6_benchmarks.py",
+        "scripts/validate_v3_pilot.py",
+        "scripts/validate_v6_pilot.py",
     }
 )
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -133,11 +163,15 @@ def verify_formal_freeze(
                 f"{requested_matrix} != {bound_matrix}"
             )
     version = int(protocol_mapping.get("protocol_version", 1))
-    if version in (4, 5):
+    if version in (4, 5, 6):
         pilot_record = stored.get("pilot_validation")
         gate_sources = stored.get("gate_sources")
         required_sources = (
-            V4_GATE_SOURCE_PATHS if version == 4 else V5_GATE_SOURCE_PATHS
+            V4_GATE_SOURCE_PATHS
+            if version == 4
+            else V5_GATE_SOURCE_PATHS
+            if version == 5
+            else V6_GATE_SOURCE_PATHS
         )
         validator_path = f"scripts/validate_v{version}_pilot.py"
         if not isinstance(pilot_record, Mapping):
@@ -211,6 +245,51 @@ def verify_formal_freeze(
                     raise FreezeGateError(
                         "Protocol v5 freeze manifest has a malformed pilot recovery binding"
                     )
+        elif version == 6:
+            expected_artifact_class = "NON_REPORTABLE_V6_MECHANISM_PILOT_ACCEPTANCE"
+            if pilot_record.get("artifact_class") != expected_artifact_class:
+                raise FreezeGateError(
+                    "Protocol v6 formal release is not bound to the six-condition pilot artifact"
+                )
+            training_environment_sha256 = pilot_record.get(
+                "training_environment_sha256"
+            )
+            if not _is_sha256(training_environment_sha256):
+                raise FreezeGateError(
+                    "Protocol v6 freeze manifest has no valid pilot-bound "
+                    "training_environment_sha256"
+                )
+            expected_conditions = list(active_conditions_for_protocol(protocol_mapping))
+            if pilot_record.get("conditions") != expected_conditions:
+                raise FreezeGateError(
+                    "Protocol v6 freeze manifest does not bind the ordered six-condition pilot"
+                )
+            datasets = pilot_record.get("datasets")
+            if not isinstance(datasets, Mapping) or set(datasets) != {"cifar100"}:
+                raise FreezeGateError(
+                    "Protocol v6 freeze manifest does not bind the CIFAR-100 pilot"
+                )
+            evidence = datasets["cifar100"]
+            required_hashes = (
+                "block_hash",
+                "health_report_sha256",
+                "attempt_receipt_sha256",
+                "pilot_plan_sha256",
+                "shared_weight_sha256",
+                "split_manifest_sha256",
+            )
+            if (
+                not isinstance(evidence, Mapping)
+                or evidence.get("status") != "PASS"
+                or evidence.get("pass") is not True
+                or evidence.get("environment_sha256")
+                != training_environment_sha256
+                or any(not _is_sha256(evidence.get(key)) for key in required_hashes)
+            ):
+                raise FreezeGateError(
+                    "Protocol v6 freeze manifest has an inconsistent six-condition "
+                    "pilot/environment binding"
+                )
         if not isinstance(gate_sources, Mapping) or set(gate_sources) != required_sources:
             raise FreezeGateError(
                 f"Protocol v{version} freeze manifest does not bind the complete "

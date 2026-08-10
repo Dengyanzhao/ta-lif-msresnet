@@ -95,8 +95,12 @@ def _matrix_runs(
         return generate_v4_pilot_matrix(protocol)
     if version == 5:
         return generate_v5_pilot_matrix(protocol)
+    if version == 6:
+        from talif_msresnet.config_v6 import generate_v6_pilot_matrix
+
+        return generate_v6_pilot_matrix(protocol)
     raise ValueError(
-        "Pilot matrix generation through this mode requires protocol v3, v4, or v5"
+        "Pilot matrix generation through this mode requires protocol v3, v4, v5, or v6"
     )
 
 
@@ -206,7 +210,7 @@ def generate(
     if stage not in {"formal", "pilot"}:
         raise ValueError("stage must be formal or pilot")
     output_dir = Path(output_dir)
-    if protocol["protocol_version"] in (4, 5):
+    if protocol["protocol_version"] in (4, 5, 6):
         expected_output = _expected_matrix_dir(protocol, stage=stage)
         if output_dir.resolve() != expected_output:
             raise ValueError(
@@ -216,8 +220,12 @@ def generate(
             )
     runs = _matrix_runs(protocol, stage=stage)
     resolved_runs = [validate_run_mapping(run, protocol) for run in runs]
-    if protocol["protocol_version"] in (4, 5):
-        expected_count = 4 if stage == "pilot" else 20
+    if protocol["protocol_version"] in (4, 5, 6):
+        expected_count = (
+            (6 if stage == "pilot" else 48)
+            if protocol["protocol_version"] == 6
+            else (4 if stage == "pilot" else 20)
+        )
         if len(resolved_runs) != expected_count:
             raise ValueError(
                 f"Protocol v{protocol['protocol_version']} {stage} matrix must contain "
@@ -265,14 +273,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         help=(
             "Generated matrix directory. Defaults to configs/generated for legacy "
-            "protocols and to the isolated artifact_paths matrix for protocols v3/v4/v5."
+            "protocols and to the isolated artifact_paths matrix for protocols v3/v4/v5/v6."
         ),
     )
     parser.add_argument(
         "--stage",
         choices=("formal", "pilot"),
         default="formal",
-        help="Generate the formal matrix or a protocol-v3/v4/v5 non-reportable pilot matrix",
+        help="Generate the formal matrix or a protocol-v3/v4/v5/v6 non-reportable pilot matrix",
     )
     parser.add_argument(
         "--dry-run",
@@ -289,12 +297,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output is None:
         output = (
             PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
-            if protocol["protocol_version"] in (3, 4, 5)
+            if protocol["protocol_version"] in (3, 4, 5, 6)
             else PROJECT_ROOT / "configs" / "generated"
         )
     else:
         output = Path(args.output)
-    if protocol["protocol_version"] in (3, 4, 5):
+    if protocol["protocol_version"] in (3, 4, 5, 6):
         expected_output = (
             PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_path_key]
         ).resolve()
