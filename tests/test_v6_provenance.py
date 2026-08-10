@@ -2,26 +2,31 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from talif_msresnet import pilot_v6, preflight
+ROOT = Path(__file__).resolve().parents[1]
+SRC_PATH = ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+import analyze_v6_results as v6_analysis
+import archive_v6_evidence as v6_archive
+import evaluate_checkpoints as final_eval
+import pilot_health_gate_v6 as v6_health_gate
+
+from talif_msresnet import config_v6, pilot_v6, preflight
 from talif_msresnet.config import ConfigError, load_protocol
 from talif_msresnet.config_v6 import (
     validate_v6_cifar100_provenance_files,
     validate_v6_protocol,
 )
 from talif_msresnet.utils import sha256_file
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-import analyze_v6_results as v6_analysis
-import archive_v6_evidence as v6_archive
-import evaluate_checkpoints as final_eval
 
 
 def _v6_protocol() -> dict[str, object]:
@@ -102,16 +107,64 @@ def test_v6_protocol_rejects_torchvision_and_provenance_contract_drift() -> None
         validate_v6_protocol(bad_provenance)
 
 
-def test_v6_frozen_cifar100_files_reject_each_bound_input_drift(tmp_path: Path) -> None:
+def test_v6_frozen_cifar100_files_reject_each_bound_input_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     protocol = _v6_protocol()
-    bindings = protocol["cifar100_provenance"]
-    targets: dict[str, Path] = {}
-    for key in ("source_provenance_path", "test_pickle_path", "split_manifest_path"):
-        source = ROOT / str(bindings[key])
-        target = tmp_path / str(bindings[key])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        targets[key] = target
+    test_relative = "data/cifar100/cifar-100-python/test"
+    split_relative = "data/manifests/cifar100_seed2024.json"
+    provenance_relative = "environment/CIFAR100_SOURCE_PROVENANCE.json"
+    test_path = tmp_path / test_relative
+    split_path = tmp_path / split_relative
+    provenance_path = tmp_path / provenance_relative
+    test_path.parent.mkdir(parents=True)
+    split_path.parent.mkdir(parents=True)
+    provenance_path.parent.mkdir(parents=True)
+    test_path.write_bytes(b"frozen held-out test bytes")
+    split_path.write_text(
+        json.dumps({"manifest_sha256": "internal-split-hash"}) + "\n",
+        encoding="utf-8",
+    )
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "schema": "cifar100-source-provenance-v1",
+                "extracted_binding": {
+                    "files": {
+                        "test": {
+                            "sha256": sha256_file(test_path),
+                            "bytes": test_path.stat().st_size,
+                        }
+                    }
+                },
+                "development_split_binding": {
+                    "path": split_relative,
+                    "file_sha256": sha256_file(split_path),
+                    "internal_manifest_sha256": "internal-split-hash",
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bindings = {
+        "source_provenance_path": provenance_relative,
+        "source_provenance_schema": "cifar100-source-provenance-v1",
+        "source_provenance_sha256": sha256_file(provenance_path),
+        "test_pickle_path": test_relative,
+        "test_pickle_bytes": test_path.stat().st_size,
+        "test_pickle_sha256": sha256_file(test_path),
+        "split_manifest_path": split_relative,
+        "split_manifest_sha256": sha256_file(split_path),
+    }
+    protocol["cifar100_provenance"] = bindings
+    monkeypatch.setattr(config_v6, "V6_CIFAR100_PROVENANCE_CONTRACT", bindings)
+    targets = {
+        "source_provenance_path": provenance_path,
+        "test_pickle_path": test_path,
+        "split_manifest_path": split_path,
+    }
 
     observed = validate_v6_cifar100_provenance_files(protocol, project_root=tmp_path)
     assert observed["cifar100_test_pickle_sha256"] == bindings["test_pickle_sha256"]
@@ -139,7 +192,7 @@ def test_source_only_preflight_skips_local_torchvision_runtime_gate(
 
     source_only = preflight.check_protocol(
         protocol_path,
-        mode="full",
+        mode="pilot",
         project_root=ROOT,
         check_dependencies=False,
     )
@@ -147,7 +200,7 @@ def test_source_only_preflight_skips_local_torchvision_runtime_gate(
 
     runtime = preflight.check_protocol(
         protocol_path,
-        mode="full",
+        mode="pilot",
         project_root=ROOT,
         check_dependencies=True,
     )
@@ -162,6 +215,76 @@ def test_health_runtime_contract_rejects_cpu_torchvision_before_seed_claim(
 
     with pytest.raises(pilot_v6.PilotV6Error, match="torchvision mismatch"):
         pilot_v6.validate_v6_runtime_environment(environment)
+
+
+def test_health_preclaim_blocks_cifar100_provenance_before_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        model=SimpleNamespace(condition="M0"),
+        runtime=SimpleNamespace(seed=123, deterministic=True, amp=False),
+        data=SimpleNamespace(dataset="cifar100"),
+    )
+    block = SimpleNamespace(conditions=("M0",), pilot_seed=123)
+    protocol = {
+        "pilot_acceptance": {
+            "environment": {
+                "expected_gpu_substring": "RTX 5090",
+                "cublas_workspace_config": ":4096:8",
+            },
+            "health": {"fixed_batch_size": 8},
+        }
+    }
+    git_identity = {"git_commit": "a" * 40, "tracked_clean": True}
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    monkeypatch.setattr(v6_health_gate, "_configure_deterministic_runtime", lambda: None)
+    monkeypatch.setattr(
+        v6_health_gate.legacy_gate,
+        "require_target_cuda",
+        lambda *_args, **_kwargs: {"device": "cuda:0", "name": "RTX 5090"},
+    )
+    monkeypatch.setattr(
+        v6_health_gate.legacy_gate,
+        "validate_runtime_environment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(v6_health_gate, "validate_v6_runtime_environment", lambda _env: None)
+    monkeypatch.setattr(
+        v6_health_gate.legacy_gate,
+        "gpu_idle_precheck",
+        lambda *_args, **_kwargs: {"device_uuid": "GPU-test"},
+    )
+    monkeypatch.setattr(
+        v6_health_gate,
+        "_training_environment_identity",
+        lambda *_args, **_kwargs: ("{}", "b" * 64),
+    )
+    monkeypatch.setattr(v6_health_gate, "repository_git_identity", lambda _root: git_identity)
+    monkeypatch.setattr(v6_health_gate, "_runtime_source_hashes", dict)
+    monkeypatch.setattr(
+        v6_health_gate,
+        "validate_v6_cifar100_provenance_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ConfigError("test pickle hash mismatch")
+        ),
+    )
+    monkeypatch.setattr(
+        v6_health_gate.v3_gate,
+        "load_fixed_real_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("loader must not run after failed provenance")
+        ),
+    )
+
+    with pytest.raises(pilot_v6.PilotV6Error, match="CIFAR-100 provenance"):
+        v6_health_gate._preclaim_gate(
+            protocol=protocol,
+            configs=(config,),
+            block=block,
+            device_name="cuda:0",
+            git_identity=git_identity,
+            runtime_sources={},
+        )
 
 
 def test_v6_final_test_rejects_an_empty_source_binding() -> None:
