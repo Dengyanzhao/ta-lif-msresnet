@@ -1,1 +1,4 @@
 configs/**/run_manifest.csv text eol=lf
+configs/protocol_v6_mechanism.yaml text eol=lf
+configs/v6_mechanism_generated/** text eol=lf
+configs/v6_mechanism_pilot_generated/** text eol=lf
