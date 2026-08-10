@@ -250,7 +250,14 @@ def test_precheck_only_does_not_construct_receipt_or_claim_seed(
     assert health_output.exists() is False
 
 
-@pytest.mark.parametrize("failure", ["hardware preclaim failure", "loader preclaim failure"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "hardware preclaim failure",
+        "provenance preclaim failure",
+        "loader preclaim failure",
+    ],
+)
 def test_preclaim_failure_does_not_claim_seed_or_run_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -339,6 +346,7 @@ def test_preclaim_failure_does_not_claim_seed_or_run_gate(
             lambda *_args, **_kwargs: {"device": "cuda:0", "name": "RTX 5090"},
         )
         monkeypatch.setattr(gate.legacy_gate, "validate_runtime_environment", lambda *_args: None)
+        monkeypatch.setattr(gate, "validate_v6_runtime_environment", lambda *_args: "unused")
         monkeypatch.setattr(
             gate.legacy_gate,
             "gpu_idle_precheck",
@@ -352,11 +360,25 @@ def test_preclaim_failure_does_not_claim_seed_or_run_gate(
                 "a" * 64,
             ),
         )
-        monkeypatch.setattr(
-            gate.v3_gate,
-            "load_fixed_real_batch",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(gate.PilotV6Error(failure)),
-        )
+        if failure.startswith("provenance"):
+            monkeypatch.setattr(
+                gate,
+                "validate_v6_cifar100_provenance_files",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError(failure)),
+            )
+            monkeypatch.setattr(
+                gate.v3_gate,
+                "load_fixed_real_batch",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("provenance failure must block before the loader")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                gate.v3_gate,
+                "load_fixed_real_batch",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(gate.PilotV6Error(failure)),
+            )
 
     def forbidden_receipt(**_kwargs: Any) -> dict[str, Any]:
         nonlocal receipt_called

@@ -39,7 +39,10 @@ from talif_msresnet.config import (
     load_protocol,
     load_run_config,
 )
-from talif_msresnet.config_v6 import V6_ACTIVE_CONDITIONS
+from talif_msresnet.config_v6 import (
+    V6_ACTIVE_CONDITIONS,
+    validate_v6_cifar100_provenance_files,
+)
 from talif_msresnet.data import build_loaders
 from talif_msresnet.models import build_model
 from talif_msresnet.pathing import artifact_path_reference
@@ -307,6 +310,15 @@ def _preclaim_gate(
 
     if configs[0].data.dataset != "cifar100":
         raise PilotV6Error("V6 preclaim loader must be bound to CIFAR-100")
+    try:
+        cifar100_provenance = validate_v6_cifar100_provenance_files(
+            protocol,
+            project_root=REPOSITORY_ROOT,
+        )
+    except ValueError as exc:
+        raise PilotV6Error(
+            f"V6 preclaim CIFAR-100 provenance differs from the frozen protocol: {exc}"
+        ) from exc
     health_contract = protocol["pilot_acceptance"]["health"]
     required_batch = int(health_contract["fixed_batch_size"])
     _resolved, inputs, targets, split_manifest, source_identity = v3_gate.load_fixed_real_batch(
@@ -360,6 +372,7 @@ def _preclaim_gate(
         "fixed_batch_size": required_batch,
         "validation_batch_shape": list(validation_batch[0].shape),
         "validation_batch_size": int(validation_batch[0].shape[0]),
+        **cifar100_provenance,
         "source_identity": dict(source_identity),
         "runtime_sources_sha256": dict(runtime_sources),
     }
