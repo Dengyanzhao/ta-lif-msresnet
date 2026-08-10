@@ -65,6 +65,7 @@ def _git(*args: str, cwd: Path = PROJECT_ROOT) -> str:
         cwd=cwd,
         capture_output=True,
         text=True,
+        errors="replace",
         check=False,
     )
     if completed.returncode:
