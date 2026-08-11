@@ -284,6 +284,48 @@ echo "V7_HEALTH_COMMAND_EXIT=$rc"
 
 必须同时看到 `V7_HEALTH_GATE_PASS` 和 `V7_HEALTH_COMMAND_EXIT=0`。无论成功还是失败，health attempt receipt 都表示 seed 已消耗；失败时不要重试，下载 health report、attempt receipt、`/hy-tmp/v7-health.log` 和 `/hy-tmp/v7-health.exit` 后停止。
 
+### D1R. 已消耗 health PASS 的密封兼容恢复
+
+本节只适用于 health 已 PASS、health seed 已消耗、但 pilot 在 `run_started` 之前被兼容性校验器阻断的单次恢复。不得重跑 health，也不得在密封恢复提交安装并验证前再次启动 pilot。原 health report 与 attempt receipt 必须保持逐字节不变。
+
+安装经过校验的增量 bundle 后，先保存会被成功重跑覆盖的首次阻断日志，再执行唯一允许的零 seed 兼容预检：
+
+```bash
+set +e
+set -o pipefail
+(
+  set -euo pipefail
+  test -s /hy-tmp/v7-pilot.log
+  test -s /hy-tmp/v7-pilot.exit
+  test "$(cat /hy-tmp/v7-pilot.exit)" = 1
+  test ! -e /hy-tmp/v7-pilot-blocked-launch.log
+  test ! -e /hy-tmp/v7-pilot-blocked-launch.exit
+  test ! -e /hy-tmp/v7-pilot-blocked-launch.sha256
+  cp --preserve=timestamps /hy-tmp/v7-pilot.log \
+    /hy-tmp/v7-pilot-blocked-launch.log
+  cp --preserve=timestamps /hy-tmp/v7-pilot.exit \
+    /hy-tmp/v7-pilot-blocked-launch.exit
+  cd /hy-tmp
+  sha256sum v7-pilot-blocked-launch.log v7-pilot-blocked-launch.exit \
+    > v7-pilot-blocked-launch.sha256
+  sha256sum -c v7-pilot-blocked-launch.sha256
+  echo V7_BLOCKED_LAUNCH_EVIDENCE_PRESERVED
+  cd /hy-tmp/ta-lif-msresnet
+  PYTHON=/root/venvs/talif-msresnet/bin/python
+  export CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8
+  test "$(cat /hy-tmp/v7-health.exit)" = 0
+  "$PYTHON" scripts/pilot_health_gate_v7.py \
+    --protocol configs/protocol_v7_mechanism.yaml \
+    --config-dir configs/v7_mechanism_pilot_generated \
+    --device cuda:0 --pilot-compatibility-precheck-only
+) 2>&1 | tee /hy-tmp/v7-compatibility-precheck.log
+rc=${PIPESTATUS[0]}
+printf '%s\n' "$rc" > /hy-tmp/v7-compatibility-precheck.exit
+echo "V7_PILOT_COMPATIBILITY_PRECHECK_EXIT=$rc"
+```
+
+必须同时看到 `V7_BLOCKED_LAUNCH_EVIDENCE_PRESERVED`、`V7_PILOT_COMPATIBILITY_PRECHECK_PASS`、两个 `SHA256_UNCHANGED` 标记、`NO_HEALTH_OR_PILOT_SEED_WAS_CLAIMED` 和 `V7_PILOT_COMPATIBILITY_PRECHECK_EXIT=0`。并再次确认 pilot plan、pilot 输出目录和 pilot validation 均不存在。任一检查失败都停止，不得重跑 health 或启动 pilot。
+
 ### D2. 六条件 Pilot
 
 Health PASS 后运行完整、不可报告的六条件 pilot。下面的 `--dataset cifar100` 是冻结 pilot 选择器，不得再增删任何筛选参数：
@@ -592,12 +634,17 @@ if [ "$rc" -eq 0 ]; then
   cd /hy-tmp
   test ! -e ta-lif-msresnet-v7-session-logs.tar.gz
   test ! -e ta-lif-msresnet-v7-session-logs.tar.gz.sha256
-  for stage in restore environment precheck health pilot freeze formal benchmark final-test analysis archive; do
+  for stage in restore environment precheck health compatibility-precheck pilot freeze formal benchmark final-test analysis archive; do
     test -s "v7-${stage}.log"
     test -s "v7-${stage}.exit"
     test "$(cat "v7-${stage}.exit")" = 0
   done
-  tar -czf ta-lif-msresnet-v7-session-logs.tar.gz v7-*.log v7-*.exit
+  test -s v7-pilot-blocked-launch.log
+  test "$(cat v7-pilot-blocked-launch.exit)" = 1
+  test -s v7-pilot-blocked-launch.sha256
+  sha256sum -c v7-pilot-blocked-launch.sha256
+  tar -czf ta-lif-msresnet-v7-session-logs.tar.gz \
+    v7-*.log v7-*.exit v7-*.sha256
   sha256sum ta-lif-msresnet-v7-session-logs.tar.gz > ta-lif-msresnet-v7-session-logs.tar.gz.sha256
   sha256sum -c ta-lif-msresnet-v7-session-logs.tar.gz.sha256
   echo V7_SESSION_LOG_ARCHIVE_PASS

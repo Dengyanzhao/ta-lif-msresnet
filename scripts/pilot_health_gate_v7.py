@@ -63,6 +63,8 @@ from talif_msresnet.pilot_v7 import (
     json_file_payload_sha256,
     require_v7_author_freeze,
     resolve_pilot_block,
+    validate_health_recovery_release,
+    validate_health_report,
     validate_v7_runtime_environment,
 )
 from talif_msresnet.train import (
@@ -105,10 +107,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config-dir", type=Path)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--precheck-only",
         action="store_true",
         help="Run reversible V7 health setup checks without claiming the health seed.",
+    )
+    mode.add_argument(
+        "--pilot-compatibility-precheck-only",
+        action="store_true",
+        help=(
+            "Validate the sealed recovery against the consumed health PASS without "
+            "creating pilot artifacts or authorizing training."
+        ),
     )
     return parser
 
@@ -1238,10 +1249,24 @@ def validate_current_runtime_against_health_report(
     if not device or device == "auto":
         raise PilotV7Error("V7 pilot launch requires an explicit CUDA device")
     identity = repository_git_identity(REPOSITORY_ROOT)
-    if identity.get("tracked_clean") is not True or identity.get("git_commit") != report.get(
+    recovery = report.get("compatibility_recovery")
+    verified_recovery: dict[str, Any] | None = None
+    expected_commit = report.get("git_commit")
+    if recovery is not None:
+        if not isinstance(recovery, Mapping):
+            raise PilotV7Error("V7 health compatibility recovery binding is malformed")
+        verified_recovery = validate_health_recovery_release(
+            REPOSITORY_ROOT,
+            health_path=block.health_output,
+            attempt_receipt_path=block.attempt_receipt,
+        )
+        if dict(recovery) != verified_recovery:
+            raise PilotV7Error("V7 health compatibility recovery binding changed")
+        expected_commit = verified_recovery["recovery_commit"]
+    if identity.get("tracked_clean") is not True or identity.get(
         "git_commit"
-    ):
-        raise PilotV7Error("Current Git identity differs from the V7 health report")
+    ) != expected_commit:
+        raise PilotV7Error("Current Git identity differs from the V7 authorized release")
     environment_contract = protocol["pilot_acceptance"]["environment"]
     fixed_contract = protocol["pilot_acceptance"]["health"]
     selected_device = torch.device(device)
@@ -1306,7 +1331,21 @@ def validate_current_runtime_against_health_report(
     ) != cifar100_provenance:
         mismatches.append("preclaim.cifar100_provenance")
     runtime_hashes = source.get("runtime_sources_sha256")
-    if not isinstance(runtime_hashes, Mapping) or _runtime_source_hashes() != dict(runtime_hashes):
+    expected_runtime_hashes = dict(runtime_hashes) if isinstance(runtime_hashes, Mapping) else {}
+    if verified_recovery is not None:
+        implementation_hashes = verified_recovery.get("implementation_file_sha256")
+        if not isinstance(implementation_hashes, Mapping):
+            raise PilotV7Error("V7 health compatibility runtime binding is malformed")
+        expected_runtime_hashes.update(
+            {
+                relative: str(digest)
+                for relative, digest in implementation_hashes.items()
+                if relative in V7_HEALTH_RUNTIME_SOURCE_PATHS
+            }
+        )
+    if not isinstance(runtime_hashes, Mapping) or (
+        _runtime_source_hashes() != expected_runtime_hashes
+    ):
         mismatches.append("runtime_sources_sha256")
     if mismatches:
         raise PilotV7Error(
@@ -1325,6 +1364,11 @@ def validate_current_runtime_against_health_report(
         "hardware": hardware,
         "training_environment_sha256": environment_hash,
         "cifar100_provenance": cifar100_provenance,
+        **(
+            {"health_compatibility_recovery": verified_recovery}
+            if verified_recovery is not None
+            else {}
+        ),
         **observed,
     }
 
@@ -1349,18 +1393,77 @@ def main(argv: Sequence[str] | None = None) -> int:
         if config_dir != expected_config_dir:
             raise PilotV7Error("V7 health config directory differs from artifact binding")
         config_paths, configs = _load_exact_configs(protocol, protocol_path, config_dir)
+        pilot_validation = _repository_path(
+            protocol["pilot_acceptance"]["validation_output"]
+        )
+        pilot_artifacts = (
+            ("pilot plan", block.pilot_plan),
+            ("pilot output root", block.pilot_output_root),
+            ("pilot validation", pilot_validation),
+        )
+        if args.pilot_compatibility_precheck_only:
+            if not block.health_output.is_file() or not block.attempt_receipt.is_file():
+                raise PilotV7Error(
+                    "V7 compatibility precheck requires the existing canonical health PASS "
+                    "and attempt receipt"
+                )
+            for label, path in pilot_artifacts:
+                if path.exists():
+                    raise PilotV7Error(
+                        f"{label} exists before the zero-seed compatibility precheck: {path}"
+                    )
+            health_sha256_before = sha256_file(block.health_output)
+            receipt_sha256_before = sha256_file(block.attempt_receipt)
+            bound_paths = (
+                *RUNTIME_SOURCE_PATHS,
+                protocol_path,
+                *config_paths,
+                REPOSITORY_ROOT / artifact_paths_for_protocol(protocol)["signoff"],
+            )
+            _require_head_bound_sources(bound_paths)
+            report = validate_health_report(
+                block.health_output,
+                protocol_path,
+                repository_root=REPOSITORY_ROOT,
+                require_current_tracked_clean=True,
+            )
+            context = validate_current_runtime_against_health_report(
+                report,
+                protocol=protocol,
+                reference_config=configs[0],
+                block=block,
+                device=args.device,
+            )
+            if (
+                sha256_file(block.health_output) != health_sha256_before
+                or sha256_file(block.attempt_receipt) != receipt_sha256_before
+            ):
+                raise PilotV7Error(
+                    "V7 compatibility precheck changed immutable health evidence"
+                )
+            for label, path in pilot_artifacts:
+                if path.exists():
+                    raise PilotV7Error(
+                        f"{label} appeared during the zero-seed compatibility precheck: {path}"
+                    )
+            recovery = context.get("health_compatibility_recovery")
+            if not isinstance(recovery, Mapping):
+                raise PilotV7Error(
+                    "V7 compatibility precheck did not return the sealed recovery binding"
+                )
+            print(
+                "V7_PILOT_COMPATIBILITY_PRECHECK_PASS "
+                f"dataset={block.dataset} recovery_commit={recovery['recovery_commit']}"
+            )
+            print(f"HEALTH_SHA256_UNCHANGED={health_sha256_before}")
+            print(f"ATTEMPT_SHA256_UNCHANGED={receipt_sha256_before}")
+            print("NO_HEALTH_OR_PILOT_SEED_WAS_CLAIMED")
+            return 0
         if block.health_output.exists():
             raise PilotV7Error("Canonical V7 health output exists; no retry is allowed")
         if block.attempt_receipt.exists():
             raise PilotV7Error("The V7 health seed is already consumed; no retry is allowed")
-        for label, path in (
-            ("pilot plan", block.pilot_plan),
-            ("pilot output root", block.pilot_output_root),
-            (
-                "pilot validation",
-                _repository_path(protocol["pilot_acceptance"]["validation_output"]),
-            ),
-        ):
+        for label, path in pilot_artifacts:
             if path.exists():
                 raise PilotV7Error(f"{label} exists before the one-shot health gate: {path}")
         git_identity = repository_git_identity(REPOSITORY_ROOT)

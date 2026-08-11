@@ -18,10 +18,10 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -40,7 +40,11 @@ from talif_msresnet.config import (  # noqa: E402
     load_run_config,
     validate_run_mapping,
 )
-
+from talif_msresnet.pilot_v7 import (  # noqa: E402
+    V7_HEALTH_RECOVERY_RELEASE_RECORD,
+    PilotV7Error,
+    validate_health_recovery_release,
+)
 
 SCHEMA = "ta-lif-msresnet-freeze-manifest-v1"
 SIGNED_STATUS = "Status: **SIGNED - AUTHOR APPROVALS COMPLETE; PROTOCOL FROZEN**"
@@ -120,6 +124,7 @@ V6_REQUIRED_SOURCE_PATHS = (
     "scripts/validate_v6_pilot.py",
 )
 V7_REQUIRED_SOURCE_PATHS = (
+    V7_HEALTH_RECOVERY_RELEASE_RECORD,
     "V7_MECHANISM_5090_RUNBOOK.md",
     "V7_STATISTICAL_ANALYSIS_AUDIT.md",
     "src/talif_msresnet/benchmark.py",
@@ -1418,6 +1423,9 @@ def _validate_v7_pilot_acceptance(
     environment_sha256 = stored.get("training_environment_sha256")
     if SHA256_RE.fullmatch(str(environment_sha256 or "")) is None:
         mismatches.append("training_environment_sha256")
+    recovery = stored.get("health_compatibility_recovery")
+    if not isinstance(recovery, Mapping):
+        mismatches.append("health_compatibility_recovery")
 
     if evidence is not None:
         expected_dataset = {
@@ -1431,6 +1439,7 @@ def _validate_v7_pilot_acceptance(
             "attempt_receipt_path": acceptance.get("attempt_receipt"),
             "pilot_plan_path": acceptance.get("pilot_plan"),
             "environment_sha256": environment_sha256,
+            "health_compatibility_recovery": recovery,
         }
         mismatches.extend(
             f"cifar100.{key}"
@@ -1494,6 +1503,26 @@ def _validate_v7_pilot_acceptance(
             "Stored v7 pilot validation differs from the current pilot artifacts"
         )
 
+    assert isinstance(recovery, Mapping)
+    try:
+        verified_recovery = validate_health_recovery_release(
+            project_root,
+            health_path=project_root / str(acceptance.get("health_output", "")),
+            attempt_receipt_path=(
+                project_root / str(acceptance.get("attempt_receipt", ""))
+            ),
+        )
+    except (OSError, PilotV7Error) as exc:
+        raise FreezeManifestError(
+            "V7 pilot health compatibility recovery fails sealed "
+            f"revalidation: {exc}"
+        ) from exc
+    if dict(recovery) != verified_recovery:
+        raise FreezeManifestError(
+            "V7 pilot validation health compatibility recovery differs from "
+            "the sealed release"
+        )
+
     assert evidence is not None
     return {
         "artifact_class": stored["artifact_class"],
@@ -1513,6 +1542,7 @@ def _validate_v7_pilot_acceptance(
             "path": validator_path.relative_to(project_root).as_posix(),
             "sha256": _sha256_file(validator_path),
         },
+        "health_compatibility_recovery": recovery,
         "datasets": {
             "cifar100": {
                 "status": evidence["status"],
@@ -1757,6 +1787,15 @@ def build_manifest(
         ) != commit:
             raise FreezeManifestError(
                 "V5 recovery validator commit must equal the formal freeze commit"
+            )
+    if is_v7 and isinstance(pilot_validation, Mapping):
+        recovery = pilot_validation.get("health_compatibility_recovery")
+        if not isinstance(recovery, Mapping) or recovery.get(
+            "recovery_commit"
+        ) != commit:
+            raise FreezeManifestError(
+                "V7 health compatibility recovery commit must equal the formal "
+                "freeze commit"
             )
     committed_protocol = _assert_committed_text(
         repo_root, commit, protocol_path, "Protocol at freeze commit"

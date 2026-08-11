@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
@@ -61,6 +62,41 @@ V7_HEALTH_RUNTIME_SOURCE_PATHS: tuple[str, ...] = (
     "src/talif_msresnet/preflight.py",
     "src/talif_msresnet/train.py",
     "src/talif_msresnet/utils.py",
+)
+V7_HEALTH_RECOVERY_SCHEMA = (
+    "ta-lif-msresnet-v7-health-compatibility-recovery-release-v1"
+)
+V7_HEALTH_RECOVERY_RELEASE_RECORD = (
+    "V7_HEALTH_COMPATIBILITY_RECOVERY_RELEASE.json"
+)
+V7_HEALTH_RECOVERY_BASE_COMMIT = "de2c3bf295624e9d83caf67a078b830d51208861"
+V7_HEALTH_RECOVERY_HEALTH_SHA256 = (
+    "2419a7241dba1b95ee96757c362aee00e50bdeb9a201b90db5e287a0fbc53c56"
+)
+V7_HEALTH_RECOVERY_HEALTH_PATH = (
+    "results/pilot/v7_mechanism/health_cifar100_s1068798027.json"
+)
+V7_HEALTH_RECOVERY_ATTEMPT_SHA256 = (
+    "26f02b0df23b99354d90a76f4df63f78a949cf0a7216541b511d075c067c8281"
+)
+V7_HEALTH_RECOVERY_ATTEMPT_PATH = (
+    "results/pilot/v7_mechanism/health_cifar100_s1068798027.attempt.json"
+)
+V7_HEALTH_RECOVERY_PROTOCOL_HASH = (
+    "ce8240e28147a87ee76a3953f8097613ecc33d683339ad66d9e73a126104265c"
+)
+V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT = "cifar100:50000"
+V7_HEALTH_RECOVERY_CORRECTED_FIELD = "source.split_source_fingerprint"
+V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS: tuple[str, ...] = (
+    "V7_MECHANISM_5090_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/pilot_health_gate_v7.py",
+    "scripts/validate_v7_pilot.py",
+    "src/talif_msresnet/freeze.py",
+    "src/talif_msresnet/pilot_v7.py",
+    "tests/test_v7_freeze_gates.py",
+    "tests/test_v7_health_gate.py",
+    "tests/test_validate_v7_pilot.py",
 )
 SIGNED_STATUS = (
     "Status: **AUTHORIZED - ACCOUNTABLE AUTHOR/USER APPROVAL RECORDED; "
@@ -138,6 +174,45 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
         raise PilotV7Error(f"Cannot read {label}: {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise PilotV7Error(f"{label} must contain a JSON object")
+    return value
+
+
+def _git_output(repository_root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise PilotV7Error(
+            "Cannot inspect the V7 health recovery release "
+            f"(git {' '.join(arguments)}): {detail or 'no details'}"
+        )
+    return completed.stdout.strip()
+
+
+def _git_bytes(repository_root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise PilotV7Error(
+            "Cannot inspect the V7 health recovery release "
+            f"(git {' '.join(arguments)}): {detail or 'no details'}"
+        )
+    return completed.stdout
+
+
+def _require_full_commit(value: Any, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 40 or not set(value) <= _HEX:
+        raise PilotV7Error(f"{label} is not a full lowercase Git commit hash")
     return value
 
 
@@ -391,6 +466,269 @@ def exclusive_create_json(path: str | Path, value: Mapping[str, Any]) -> Path:
     return target
 
 
+def validate_health_recovery_release(
+    repository_root: str | Path,
+    *,
+    health_path: str | Path | None = None,
+    attempt_receipt_path: str | Path | None = None,
+    report: Mapping[str, Any] | None = None,
+    receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the one sealed compatibility fix for the consumed V7 health seed.
+
+    The health result remains evidence from its original commit.  This validator
+    permits only one exact implementation commit followed by one record-only
+    seal commit, and independently binds the immutable health and receipt bytes.
+    """
+
+    root = Path(repository_root).resolve()
+    recovery_commit = _require_full_commit(
+        _git_output(root, "rev-parse", "HEAD"), "V7 recovery release commit"
+    )
+    record_path = root / V7_HEALTH_RECOVERY_RELEASE_RECORD
+    record = _read_json(record_path, "V7 health recovery release record")
+    implementation_commit = _require_full_commit(
+        record.get("implementation_commit"), "V7 recovery implementation commit"
+    )
+
+    seal_parents = _git_output(
+        root, "rev-list", "--parents", "-n", "1", recovery_commit
+    ).split()
+    if seal_parents != [recovery_commit, implementation_commit]:
+        raise PilotV7Error(
+            "V7 recovery release must be the one-parent seal of its "
+            "implementation commit"
+        )
+    implementation_parents = _git_output(
+        root, "rev-list", "--parents", "-n", "1", implementation_commit
+    ).split()
+    if implementation_parents != [
+        implementation_commit,
+        V7_HEALTH_RECOVERY_BASE_COMMIT,
+    ]:
+        raise PilotV7Error(
+            "V7 recovery implementation must be the direct child of the "
+            "consumed-health commit"
+        )
+    if _git_output(root, "status", "--porcelain", "--untracked-files=no"):
+        raise PilotV7Error("V7 health recovery requires a clean tracked Git worktree")
+
+    implementation_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            V7_HEALTH_RECOVERY_BASE_COMMIT,
+            implementation_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    expected_changes = tuple(
+        f"M\t{path}" for path in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+    )
+    if implementation_changes != expected_changes:
+        raise PilotV7Error(
+            "V7 health recovery implementation delta is not the exact "
+            "modification-only allowlist: "
+            f"observed={list(implementation_changes)} "
+            f"expected={list(expected_changes)}"
+        )
+    seal_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            implementation_commit,
+            recovery_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    if seal_changes != (f"A\t{V7_HEALTH_RECOVERY_RELEASE_RECORD}",):
+        raise PilotV7Error(
+            "V7 health recovery seal must add only the release record"
+        )
+
+    implementation_tree = _git_output(
+        root, "rev-parse", f"{implementation_commit}^{{tree}}"
+    )
+    expected_record = {
+        "schema": V7_HEALTH_RECOVERY_SCHEMA,
+        "base_health_commit": V7_HEALTH_RECOVERY_BASE_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "health_report_path": V7_HEALTH_RECOVERY_HEALTH_PATH,
+        "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+        "attempt_receipt_path": V7_HEALTH_RECOVERY_ATTEMPT_PATH,
+        "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+        "protocol_hash": V7_HEALTH_RECOVERY_PROTOCOL_HASH,
+        "corrected_field": V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+        "split_source_fingerprint": V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
+        "allowed_changed_paths": list(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS),
+    }
+    mismatches = [
+        key for key, expected in expected_record.items() if record.get(key) != expected
+    ]
+    exact_record_keys = set(expected_record) | {
+        "implementation_file_sha256",
+        "record_sha256",
+    }
+    if set(record) != exact_record_keys:
+        mismatches.append("record_keys")
+    implementation_file_sha256 = record.get("implementation_file_sha256")
+    if not isinstance(implementation_file_sha256, Mapping) or set(
+        implementation_file_sha256
+    ) != set(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS):
+        mismatches.append("implementation_file_sha256")
+        implementation_file_sha256 = {}
+    for relative in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS:
+        committed_sha256 = hashlib.sha256(
+            _git_bytes(root, "show", f"{implementation_commit}:{relative}")
+        ).hexdigest()
+        if implementation_file_sha256.get(relative) != committed_sha256:
+            mismatches.append(f"implementation_file_sha256.{relative}")
+    record_without_hash = dict(record)
+    record_sha256 = record_without_hash.pop("record_sha256", None)
+    if record_sha256 != stable_hash(record_without_hash):
+        mismatches.append("record_sha256")
+    if mismatches:
+        raise PilotV7Error(
+            "V7 health recovery record is not the sealed reviewed "
+            "implementation: " + ", ".join(mismatches)
+        )
+
+    evidence_supplied = any(
+        value is not None
+        for value in (health_path, attempt_receipt_path, report, receipt)
+    )
+    if evidence_supplied:
+        if health_path is None or attempt_receipt_path is None:
+            raise PilotV7Error(
+                "V7 health recovery evidence requires both canonical artifact paths"
+            )
+        health_file = Path(health_path).resolve()
+        receipt_file = Path(attempt_receipt_path).resolve()
+        if not health_file.is_file() or not receipt_file.is_file():
+            raise PilotV7Error("V7 health recovery evidence files are missing")
+        try:
+            health_relative = health_file.relative_to(root).as_posix()
+            receipt_relative = receipt_file.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise PilotV7Error(
+                "V7 health recovery evidence paths escape the repository"
+            ) from exc
+        if health_relative != V7_HEALTH_RECOVERY_HEALTH_PATH:
+            raise PilotV7Error("V7 health recovery report path is not authorized")
+        if receipt_relative != V7_HEALTH_RECOVERY_ATTEMPT_PATH:
+            raise PilotV7Error("V7 health recovery receipt path is not authorized")
+        if sha256_file(health_file) != V7_HEALTH_RECOVERY_HEALTH_SHA256:
+            raise PilotV7Error("V7 health recovery report SHA-256 is not authorized")
+        if sha256_file(receipt_file) != V7_HEALTH_RECOVERY_ATTEMPT_SHA256:
+            raise PilotV7Error("V7 health recovery receipt SHA-256 is not authorized")
+        stored_report = _read_json(health_file, "V7 recovered health report")
+        stored_receipt = _read_json(receipt_file, "V7 recovered health receipt")
+        if report is not None and dict(report) != stored_report:
+            raise PilotV7Error("In-memory V7 health report differs from its sealed bytes")
+        if receipt is not None and dict(receipt) != stored_receipt:
+            raise PilotV7Error("In-memory V7 health receipt differs from its sealed bytes")
+        source = stored_report.get("source")
+        evidence_mismatches: list[str] = []
+        if stored_report.get("status") != "PASS" or stored_report.get("pass") is not True:
+            evidence_mismatches.append("health PASS state")
+        if stored_report.get("git_commit") != V7_HEALTH_RECOVERY_BASE_COMMIT:
+            evidence_mismatches.append("health git_commit")
+        if stored_receipt.get("git_commit") != V7_HEALTH_RECOVERY_BASE_COMMIT:
+            evidence_mismatches.append("receipt git_commit")
+        if stored_report.get("protocol_hash") != V7_HEALTH_RECOVERY_PROTOCOL_HASH:
+            evidence_mismatches.append("health protocol_hash")
+        if stored_receipt.get("protocol_hash") != V7_HEALTH_RECOVERY_PROTOCOL_HASH:
+            evidence_mismatches.append("receipt protocol_hash")
+        if not isinstance(source, Mapping) or source.get(
+            "split_source_fingerprint"
+        ) != V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT:
+            evidence_mismatches.append("health split_source_fingerprint")
+        if stored_report.get(
+            "attempt_receipt_sha256"
+        ) != V7_HEALTH_RECOVERY_ATTEMPT_SHA256:
+            evidence_mismatches.append("health attempt_receipt_sha256")
+        if evidence_mismatches:
+            raise PilotV7Error(
+                "V7 health recovery evidence does not match the consumed PASS: "
+                + ", ".join(evidence_mismatches)
+            )
+
+    return {
+        "schema": V7_HEALTH_RECOVERY_SCHEMA,
+        "base_health_commit": V7_HEALTH_RECOVERY_BASE_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "recovery_commit": recovery_commit,
+        "health_report_path": V7_HEALTH_RECOVERY_HEALTH_PATH,
+        "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+        "attempt_receipt_path": V7_HEALTH_RECOVERY_ATTEMPT_PATH,
+        "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+        "protocol_hash": V7_HEALTH_RECOVERY_PROTOCOL_HASH,
+        "corrected_field": V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+        "split_source_fingerprint": V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
+        "allowed_changed_paths": list(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS),
+        "observed_changes": list(implementation_changes),
+        "implementation_file_sha256": dict(implementation_file_sha256),
+        "release_record": V7_HEALTH_RECOVERY_RELEASE_RECORD,
+        "record_sha256": str(record["record_sha256"]),
+        "release_record_sha256": sha256_file(record_path),
+        "tracked_clean": True,
+    }
+
+
+def _validate_recovered_current_source(
+    *,
+    repository_root: Path,
+    receipt_source: Mapping[str, Any],
+    current_source: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+) -> None:
+    for key in ("protocol", "protocol_file_sha256", "configs"):
+        if current_source.get(key) != receipt_source.get(key):
+            raise PilotV7Error(
+                f"V7 recovered health source changed a frozen {key} binding"
+            )
+    old_runtime = receipt_source.get("runtime_sources_sha256")
+    current_runtime = current_source.get("runtime_sources_sha256")
+    implementation_sha256 = recovery.get("implementation_file_sha256")
+    if not isinstance(old_runtime, Mapping) or not isinstance(
+        current_runtime, Mapping
+    ) or not isinstance(implementation_sha256, Mapping):
+        raise PilotV7Error("V7 recovered health runtime source binding is malformed")
+    if set(old_runtime) != set(V7_HEALTH_RUNTIME_SOURCE_PATHS) or set(
+        current_runtime
+    ) != set(V7_HEALTH_RUNTIME_SOURCE_PATHS):
+        raise PilotV7Error("V7 recovered health runtime source set changed")
+    for relative in V7_HEALTH_RUNTIME_SOURCE_PATHS:
+        base_sha256 = hashlib.sha256(
+            _git_bytes(
+                repository_root,
+                "show",
+                f"{V7_HEALTH_RECOVERY_BASE_COMMIT}:{relative}",
+            )
+        ).hexdigest()
+        if old_runtime.get(relative) != base_sha256:
+            raise PilotV7Error(
+                f"V7 consumed health source is not bound to its base commit: {relative}"
+            )
+        expected = (
+            implementation_sha256[relative]
+            if relative in implementation_sha256
+            else old_runtime[relative]
+        )
+        if current_runtime.get(relative) != expected:
+            raise PilotV7Error(
+                f"V7 recovered runtime source is not sealed: {relative}"
+            )
+
+
 def validate_attempt_receipt(
     receipt: Mapping[str, Any], *, block: PilotBlock
 ) -> dict[str, Any]:
@@ -578,7 +916,9 @@ def validate_health_report_payload(
             "pilot_seed": lambda value: value == block.pilot_seed,
             "fixed_batch_shape": lambda value: isinstance(value, list) and bool(value),
             "fixed_batch_size": lambda value: isinstance(value, int) and value > 0,
-            "split_source_fingerprint": lambda value: _is_sha256(value),
+            "split_source_fingerprint": lambda value: (
+                value == V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT
+            ),
         }
         for key, predicate in required_source.items():
             if not predicate(source.get(key)):
@@ -700,28 +1040,52 @@ def validate_health_report(
     if not block.attempt_receipt.is_file():
         raise PilotV7Error("V7 health attempt receipt is missing")
     receipt = _read_json(block.attempt_receipt, "V7 health attempt receipt")
+    report = validate_health_report_payload(
+        _read_json(path, "V7 health report"), block=block, receipt=receipt
+    )
+    if report.get("attempt_receipt_sha256") != sha256_file(block.attempt_receipt):
+        raise PilotV7Error("V7 health report does not bind the attempt receipt")
     current_source = current_health_source_binding(
         protocol=protocol,
         protocol_path=protocol_file,
         block=block,
         repository_root=root,
     )
-    if receipt.get("source") != current_source:
-        raise PilotV7Error(
-            "V7 health attempt source binding differs from current frozen files"
-        )
-    report = validate_health_report_payload(
-        _read_json(path, "V7 health report"), block=block, receipt=receipt
-    )
-    if report.get("attempt_receipt_sha256") != sha256_file(block.attempt_receipt):
-        raise PilotV7Error("V7 health report does not bind the attempt receipt")
+    direct_source_match = receipt.get("source") == current_source
+    direct_identity_match = True
     if require_current_tracked_clean:
         identity = repository_git_identity(root)
-        if identity.get("tracked_clean") is not True or identity.get("git_commit") != report.get(
+        direct_identity_match = identity.get("tracked_clean") is True and identity.get(
             "git_commit"
-        ):
-            raise PilotV7Error("Current Git identity differs from the V7 health PASS")
-    return report
+        ) == report.get("git_commit")
+    if direct_source_match and direct_identity_match:
+        return report
+
+    try:
+        recovery = validate_health_recovery_release(
+            root,
+            health_path=path,
+            attempt_receipt_path=block.attempt_receipt,
+            report=report,
+            receipt=receipt,
+        )
+    except PilotV7Error as exc:
+        raise PilotV7Error(
+            "V7 health attempt source binding differs from current frozen files "
+            f"and no exact sealed recovery applies: {exc}"
+        ) from exc
+    receipt_source = receipt.get("source")
+    if not isinstance(receipt_source, Mapping):
+        raise PilotV7Error("V7 recovered health receipt has no source binding")
+    _validate_recovered_current_source(
+        repository_root=root,
+        receipt_source=receipt_source,
+        current_source=current_source,
+        recovery=recovery,
+    )
+    recovered_report = dict(report)
+    recovered_report["compatibility_recovery"] = recovery
+    return recovered_report
 
 
 def expected_pilot_plan_payload(
@@ -755,6 +1119,24 @@ def expected_pilot_plan_payload(
     environment = health_report.get("environment")
     if not isinstance(environment, Mapping):
         raise PilotV7Error("V7 health PASS has no environment binding")
+    compatibility_recovery = health_report.get("compatibility_recovery")
+    git_commit = health_report.get("git_commit")
+    recovery_fields: dict[str, Any] = {}
+    if compatibility_recovery is not None:
+        if not isinstance(compatibility_recovery, Mapping):
+            raise PilotV7Error("V7 health compatibility recovery binding is malformed")
+        verified_recovery = validate_health_recovery_release(
+            repository_root,
+            health_path=block.health_output,
+            attempt_receipt_path=block.attempt_receipt,
+        )
+        if dict(compatibility_recovery) != verified_recovery:
+            raise PilotV7Error("V7 health compatibility recovery binding changed")
+        git_commit = verified_recovery["recovery_commit"]
+        recovery_fields = {
+            "health_execution_git_commit": health_report.get("git_commit"),
+            "health_compatibility_recovery": verified_recovery,
+        }
     return {
         "version": 7,
         "artifact_class": "NON_REPORTABLE_V7_MECHANISM_PILOT_PLAN",
@@ -764,7 +1146,8 @@ def expected_pilot_plan_payload(
         "protocol_hash": block.protocol_hash,
         "acceptance_hash": block.acceptance_hash,
         "block_hash": block.block_hash,
-        "git_commit": health_report.get("git_commit"),
+        "git_commit": git_commit,
+        **recovery_fields,
         "health_report": artifact_path_reference(block.health_output, repository_root),
         "health_report_sha256": sha256_file(block.health_output),
         "attempt_receipt": artifact_path_reference(

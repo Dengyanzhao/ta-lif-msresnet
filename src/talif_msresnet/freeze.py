@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Mapping
+from typing import Any
 
 from .config import (
     active_conditions_for_protocol,
     artifact_paths_for_protocol,
     load_protocol,
 )
-
+from .pilot_v7 import (
+    V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_HEALTH_RECOVERY_ATTEMPT_PATH,
+    V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+    V7_HEALTH_RECOVERY_BASE_COMMIT,
+    V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+    V7_HEALTH_RECOVERY_HEALTH_PATH,
+    V7_HEALTH_RECOVERY_HEALTH_SHA256,
+    V7_HEALTH_RECOVERY_PROTOCOL_HASH,
+    V7_HEALTH_RECOVERY_RELEASE_RECORD,
+    V7_HEALTH_RECOVERY_SCHEMA,
+    V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
+)
 
 V4_GATE_SOURCE_PATHS = frozenset(
     {
@@ -71,6 +84,7 @@ V6_GATE_SOURCE_PATHS = frozenset(
 )
 V7_GATE_SOURCE_PATHS = frozenset(
     {
+        V7_HEALTH_RECOVERY_RELEASE_RECORD,
         "V7_MECHANISM_5090_RUNBOOK.md",
         "V7_STATISTICAL_ANALYSIS_AUDIT.md",
         "src/talif_msresnet/benchmark.py",
@@ -404,6 +418,63 @@ def verify_formal_freeze(
                     "Protocol v7 freeze manifest does not bind the CIFAR-100 pilot"
                 )
             evidence = datasets["cifar100"]
+            repository = stored.get("repository")
+            recovery = pilot_record.get("health_compatibility_recovery")
+            recovery_source = gate_sources.get(V7_HEALTH_RECOVERY_RELEASE_RECORD)
+            expected_recovery_values = {
+                "schema": V7_HEALTH_RECOVERY_SCHEMA,
+                "base_health_commit": V7_HEALTH_RECOVERY_BASE_COMMIT,
+                "health_report_path": V7_HEALTH_RECOVERY_HEALTH_PATH,
+                "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+                "attempt_receipt_path": V7_HEALTH_RECOVERY_ATTEMPT_PATH,
+                "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+                "protocol_hash": V7_HEALTH_RECOVERY_PROTOCOL_HASH,
+                "corrected_field": V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+                "split_source_fingerprint": (
+                    V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT
+                ),
+                "allowed_changed_paths": list(
+                    V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+                ),
+                "observed_changes": [
+                    f"M\t{path}"
+                    for path in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+                ],
+                "release_record": V7_HEALTH_RECOVERY_RELEASE_RECORD,
+                "tracked_clean": True,
+            }
+            if (
+                not isinstance(repository, Mapping)
+                or not isinstance(recovery, Mapping)
+                or any(
+                    recovery.get(key) != value
+                    for key, value in expected_recovery_values.items()
+                )
+                or recovery.get("recovery_commit")
+                != repository.get("freeze_commit")
+                or not isinstance(recovery.get("implementation_commit"), str)
+                or len(recovery["implementation_commit"]) != 40
+                or not set(recovery["implementation_commit"]) <= _LOWER_HEX
+                or not isinstance(recovery.get("implementation_tree"), str)
+                or len(recovery["implementation_tree"]) != 40
+                or not set(recovery["implementation_tree"]) <= _LOWER_HEX
+                or not _is_sha256(recovery.get("release_record_sha256"))
+                or not _is_sha256(recovery.get("record_sha256"))
+                or not isinstance(recovery_source, Mapping)
+                or recovery_source.get("file_sha256")
+                != recovery.get("release_record_sha256")
+                or not isinstance(recovery.get("implementation_file_sha256"), Mapping)
+                or set(recovery["implementation_file_sha256"])
+                != set(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS)
+                or any(
+                    not _is_sha256(value)
+                    for value in recovery["implementation_file_sha256"].values()
+                )
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest has a malformed sealed health "
+                    "compatibility recovery binding"
+                )
             required_hashes = (
                 "block_hash",
                 "health_report_sha256",
@@ -422,6 +493,10 @@ def verify_formal_freeze(
                 != protocol_mapping["pilot_acceptance"]["pilot_seed"]
                 or evidence.get("environment_sha256")
                 != training_environment_sha256
+                or evidence.get("health_report_sha256")
+                != recovery.get("health_report_sha256")
+                or evidence.get("attempt_receipt_sha256")
+                != recovery.get("attempt_receipt_sha256")
                 or any(not _is_sha256(evidence.get(key)) for key in required_hashes)
             ):
                 raise FreezeGateError(

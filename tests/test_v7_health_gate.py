@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,8 +16,8 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import pilot_health_gate_v7 as gate
-import talif_msresnet.pilot_v7 as pilot_v7
 
+from talif_msresnet import pilot_v7
 from talif_msresnet.config import load_protocol
 from talif_msresnet.config_v7 import (
     V7_CIFAR100_PROVENANCE_CONTRACT,
@@ -31,10 +32,15 @@ from talif_msresnet.pilot_v7 import (
     HEALTH_SEED_DISPOSITION,
     PILOT_SEED_DISPOSITION,
     REPORTING_ELIGIBILITY,
+    V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+    V7_HEALTH_RECOVERY_SCHEMA,
+    V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
     V7_HEALTH_RUNTIME_SOURCE_PATHS,
     expected_pilot_configs,
     resolve_pilot_block,
     validate_attempt_receipt,
+    validate_health_recovery_release,
     validate_health_report_payload,
 )
 
@@ -521,6 +527,94 @@ def test_precheck_only_creates_no_seed_artifacts(
     assert health_output.exists() is False
 
 
+def test_pilot_compatibility_precheck_preserves_evidence_and_pilot_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = tmp_path / "health.attempt.json"
+    health_output = tmp_path / "health.json"
+    receipt_bytes = b'{"status":"ATTEMPT_CLAIMED_SEED_CONSUMED_NO_RETRY"}\n'
+    health_bytes = b'{"status":"PASS","pass":true}\n'
+    receipt.write_bytes(receipt_bytes)
+    health_output.write_bytes(health_bytes)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    recovery = {"recovery_commit": "f" * 40}
+    block = SimpleNamespace(
+        health_output=health_output,
+        attempt_receipt=receipt,
+        pilot_plan=tmp_path / "plan.json",
+        pilot_output_root=tmp_path / "pilot",
+        dataset="cifar100",
+        health_seed=1_068_798_027,
+        pilot_seed=1_673_127_435,
+    )
+    protocol = {
+        "protocol_version": 7,
+        "pilot_acceptance": {"validation_output": "validation.json"},
+    }
+
+    monkeypatch.setattr(gate, "load_protocol", lambda _path: protocol)
+    monkeypatch.setattr(gate, "resolve_pilot_block", lambda *_args, **_kwargs: block)
+    monkeypatch.setattr(
+        gate, "require_v7_author_freeze", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        gate,
+        "artifact_paths_for_protocol",
+        lambda _protocol: {"pilot_matrix": "matrix", "signoff": "signoff"},
+    )
+    monkeypatch.setattr(
+        gate,
+        "_repository_path",
+        lambda value: config_dir if value == "matrix" else tmp_path / str(value),
+    )
+    reference_config = SimpleNamespace()
+    monkeypatch.setattr(
+        gate, "_load_exact_configs", lambda *_args: ((), (reference_config,))
+    )
+    monkeypatch.setattr(gate, "_require_head_bound_sources", lambda _paths: None)
+    monkeypatch.setattr(
+        gate,
+        "validate_health_report",
+        lambda *_args, **_kwargs: {"compatibility_recovery": recovery},
+    )
+    monkeypatch.setattr(
+        gate,
+        "validate_current_runtime_against_health_report",
+        lambda *_args, **_kwargs: {"health_compatibility_recovery": recovery},
+    )
+    monkeypatch.setattr(
+        gate,
+        "attempt_receipt_payload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("compatibility precheck must not construct a receipt")
+        ),
+    )
+    monkeypatch.setattr(
+        gate,
+        "run_gate",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("compatibility precheck must not execute health probes")
+        ),
+    )
+
+    assert gate.main(
+        [
+            "--protocol",
+            str(tmp_path / "protocol.yaml"),
+            "--pilot-compatibility-precheck-only",
+        ]
+    ) == 0
+    stdout = capsys.readouterr().out
+    assert "V7_PILOT_COMPATIBILITY_PRECHECK_PASS" in stdout
+    assert "NO_HEALTH_OR_PILOT_SEED_WAS_CLAIMED" in stdout
+    assert receipt.read_bytes() == receipt_bytes
+    assert health_output.read_bytes() == health_bytes
+    assert block.pilot_plan.exists() is False
+    assert block.pilot_output_root.exists() is False
+    assert (tmp_path / "validation.json").exists() is False
+
+
 def test_existing_v7_receipt_blocks_retry_before_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -791,7 +885,7 @@ def _valid_report(block: Any) -> dict[str, Any]:
             "fixed_batch_shape": [32, 3, 32, 32],
             "fixed_batch_size": 32,
             "split_manifest_sha256": split_sha256,
-            "split_source_fingerprint": "8" * 64,
+            "split_source_fingerprint": V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
             "cifar100_provenance": provenance,
         },
         "preclaim": {
@@ -842,6 +936,23 @@ def test_health_report_requires_protocol_frozen_adaptive_mapping() -> None:
 
     report["checks"]["expected_adaptive_update_by_condition"]["M0"] = True
     with pytest.raises(gate.PilotV7Error, match="exact PASS"):
+        validate_health_report_payload(report, block=block, receipt=receipt)
+
+
+@pytest.mark.parametrize("invalid", ["8" * 64, "cifar100:49999", "cifar100"])
+def test_health_report_accepts_only_exact_static_split_fingerprint(
+    invalid: str,
+) -> None:
+    protocol = load_protocol(ROOT / "configs" / "protocol_v7_mechanism.yaml")
+    block = resolve_pilot_block(protocol, repository_root=ROOT)
+    receipt = _valid_receipt(block)
+    report = _valid_report(block)
+    assert validate_health_report_payload(report, block=block, receipt=receipt)["pass"]
+
+    report["source"]["split_source_fingerprint"] = invalid
+    with pytest.raises(
+        gate.PilotV7Error, match="source.split_source_fingerprint"
+    ):
         validate_health_report_payload(report, block=block, receipt=receipt)
 
 
@@ -1025,3 +1136,224 @@ def test_v7_health_paths_and_seeds_are_isolated_from_v6() -> None:
     assert "v7_mechanism" in v7_block.health_output.as_posix()
     assert "v6_mechanism" not in v7_block.health_output.as_posix()
     assert all(config.runtime.run_id.startswith("E9_") for config in expected_pilot_configs(v7))
+
+
+def _git(root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _git_bytes(root: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    return completed.stdout
+
+
+def _sealed_v7_health_recovery_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    extra_implementation_path: bool = False,
+    release_overrides: dict[str, Any] | None = None,
+) -> tuple[Path, Path, Path, dict[str, Any], dict[str, Any]]:
+    root = tmp_path / "recovery"
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.name", "V7 Recovery Test")
+    _git(root, "config", "user.email", "v7-recovery@example.invalid")
+    for relative in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"base:{relative}\n", encoding="utf-8")
+    _git(root, "add", "--", *V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS)
+    _git(root, "commit", "-m", "base health source")
+    base_commit = _git(root, "rev-parse", "HEAD")
+
+    receipt_path = root / "evidence" / "health.attempt.json"
+    health_path = root / "evidence" / "health.json"
+    protocol_hash = "c" * 64
+    receipt = {"git_commit": base_commit, "protocol_hash": protocol_hash}
+    pilot_v7.exclusive_create_json(receipt_path, receipt)
+    attempt_sha256 = gate.sha256_file(receipt_path)
+    report = {
+        "status": "PASS",
+        "pass": True,
+        "git_commit": base_commit,
+        "protocol_hash": protocol_hash,
+        "attempt_receipt_sha256": attempt_sha256,
+        "source": {
+            "split_source_fingerprint": (
+                V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT
+            )
+        },
+    }
+    pilot_v7.exclusive_create_json(health_path, report)
+    health_sha256 = gate.sha256_file(health_path)
+
+    monkeypatch.setattr(pilot_v7, "V7_HEALTH_RECOVERY_BASE_COMMIT", base_commit)
+    monkeypatch.setattr(
+        pilot_v7, "V7_HEALTH_RECOVERY_HEALTH_SHA256", health_sha256
+    )
+    monkeypatch.setattr(
+        pilot_v7,
+        "V7_HEALTH_RECOVERY_HEALTH_PATH",
+        health_path.relative_to(root).as_posix(),
+    )
+    monkeypatch.setattr(
+        pilot_v7, "V7_HEALTH_RECOVERY_ATTEMPT_SHA256", attempt_sha256
+    )
+    monkeypatch.setattr(
+        pilot_v7,
+        "V7_HEALTH_RECOVERY_ATTEMPT_PATH",
+        receipt_path.relative_to(root).as_posix(),
+    )
+    monkeypatch.setattr(
+        pilot_v7, "V7_HEALTH_RECOVERY_PROTOCOL_HASH", protocol_hash
+    )
+
+    for relative in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS:
+        (root / relative).write_text(f"recovered:{relative}\n", encoding="utf-8")
+    implementation_paths = list(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS)
+    if extra_implementation_path:
+        unexpected = root / "unexpected_recovery_change.txt"
+        unexpected.write_text("not authorized\n", encoding="utf-8")
+        implementation_paths.append(unexpected.relative_to(root).as_posix())
+    _git(root, "add", "--", *implementation_paths)
+    _git(root, "commit", "-m", "implement health compatibility recovery")
+    implementation_commit = _git(root, "rev-parse", "HEAD")
+    implementation_tree = _git(root, "rev-parse", f"{implementation_commit}^{{tree}}")
+    implementation_sha256 = {
+        relative: pilot_v7.hashlib.sha256(
+            _git_bytes(root, "show", f"{implementation_commit}:{relative}")
+        ).hexdigest()
+        for relative in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+    }
+    release = {
+        "schema": V7_HEALTH_RECOVERY_SCHEMA,
+        "base_health_commit": base_commit,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "health_report_path": health_path.relative_to(root).as_posix(),
+        "health_report_sha256": health_sha256,
+        "attempt_receipt_path": receipt_path.relative_to(root).as_posix(),
+        "attempt_receipt_sha256": attempt_sha256,
+        "protocol_hash": protocol_hash,
+        "corrected_field": V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+        "split_source_fingerprint": (
+            V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT
+        ),
+        "allowed_changed_paths": list(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS),
+        "implementation_file_sha256": implementation_sha256,
+    }
+    if release_overrides is not None:
+        release.update(release_overrides)
+    release["record_sha256"] = pilot_v7.stable_hash(release)
+    release_path = root / pilot_v7.V7_HEALTH_RECOVERY_RELEASE_RECORD
+    pilot_v7.exclusive_create_json(release_path, release)
+    _git(root, "add", "--", pilot_v7.V7_HEALTH_RECOVERY_RELEASE_RECORD)
+    _git(root, "commit", "-m", "seal health compatibility recovery")
+    return root, health_path, receipt_path, report, receipt
+
+
+def test_health_recovery_release_accepts_only_sealed_two_commit_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, health_path, receipt_path, report, receipt = (
+        _sealed_v7_health_recovery_fixture(tmp_path, monkeypatch)
+    )
+
+    binding = validate_health_recovery_release(
+        root,
+        health_path=health_path,
+        attempt_receipt_path=receipt_path,
+        report=report,
+        receipt=receipt,
+    )
+
+    assert binding["base_health_commit"] == report["git_commit"]
+    assert binding["recovery_commit"] == _git(root, "rev-parse", "HEAD")
+    assert binding["observed_changes"] == [
+        f"M\t{path}" for path in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+    ]
+    assert binding["tracked_clean"] is True
+
+
+def test_health_recovery_release_rejects_changed_evidence_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, health_path, receipt_path, _report, _receipt = (
+        _sealed_v7_health_recovery_fixture(tmp_path, monkeypatch)
+    )
+    health_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="report SHA-256"):
+        validate_health_recovery_release(
+            root,
+            health_path=health_path,
+            attempt_receipt_path=receipt_path,
+        )
+
+
+def test_health_recovery_release_rejects_dirty_tracked_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _health_path, _receipt_path, _report, _receipt = (
+        _sealed_v7_health_recovery_fixture(tmp_path, monkeypatch)
+    )
+    changed = root / V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS[0]
+    changed.write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="clean tracked Git worktree"):
+        validate_health_recovery_release(root)
+
+
+def test_health_recovery_release_rejects_extra_implementation_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _health_path, _receipt_path, _report, _receipt = (
+        _sealed_v7_health_recovery_fixture(
+            tmp_path,
+            monkeypatch,
+            extra_implementation_path=True,
+        )
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="exact modification-only allowlist"):
+        validate_health_recovery_release(root)
+
+
+def test_health_recovery_release_rejects_tampered_sealed_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _health_path, _receipt_path, _report, _receipt = (
+        _sealed_v7_health_recovery_fixture(
+            tmp_path,
+            monkeypatch,
+            release_overrides={"corrected_field": "source.unrelated_field"},
+        )
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="corrected_field"):
+        validate_health_recovery_release(root)
+
+
+def test_health_recovery_release_rejects_commit_after_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _health_path, _receipt_path, _report, _receipt = (
+        _sealed_v7_health_recovery_fixture(tmp_path, monkeypatch)
+    )
+    _git(root, "commit", "--allow-empty", "-m", "unauthorized commit after seal")
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="one-parent seal"):
+        validate_health_recovery_release(root)

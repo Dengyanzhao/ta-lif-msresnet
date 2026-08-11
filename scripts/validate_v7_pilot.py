@@ -288,6 +288,13 @@ def _bound_evidence(
     else:
         if plan != expected_plan:
             failures.append("pilot plan differs from the exact V7 bound payload")
+    recovery = health.get("compatibility_recovery")
+    if recovery is not None:
+        if not isinstance(recovery, Mapping):
+            failures.append("health compatibility recovery binding is malformed")
+            recovery = None
+        elif plan.get("health_compatibility_recovery") != recovery:
+            failures.append("pilot plan health compatibility recovery binding mismatch")
     return {
         "health": health,
         "health_path": artifact_path_reference(block.health_output, repository_root),
@@ -297,6 +304,7 @@ def _bound_evidence(
         "plan": plan,
         "plan_path": artifact_path_reference(block.pilot_plan, repository_root),
         "plan_sha256": sha256_file(block.pilot_plan),
+        "health_compatibility_recovery": recovery,
     }, failures
 
 
@@ -445,6 +453,11 @@ def _orchestrator_failures(
         "attempt_receipt_sha256": bound.get("attempt_receipt_sha256"),
         "pilot_plan": bound.get("plan_path"),
         "pilot_plan_sha256": bound.get("plan_sha256"),
+        "git_commit": (
+            bound.get("plan", {}).get("git_commit")
+            if isinstance(bound.get("plan"), Mapping)
+            else None
+        ),
     }
     failures = [
         f"orchestrator evidence {key} mismatch"
@@ -469,6 +482,13 @@ def _orchestrator_failures(
             for key, value in runtime_expected.items()
             if runtime.get(key) != value
         )
+        recovery = bound.get("health_compatibility_recovery")
+        if recovery is not None and runtime.get(
+            "health_compatibility_recovery"
+        ) != recovery:
+            failures.append(
+                "orchestrator runtime context health compatibility recovery mismatch"
+            )
     return failures
 
 
@@ -998,7 +1018,10 @@ def validate_pilot(
         "integrity_failures": integrity,
         "threshold_failures": thresholds,
     }
-    return {
+    recovery = bound.get("health_compatibility_recovery")
+    if recovery is not None:
+        dataset_report["health_compatibility_recovery"] = recovery
+    report = {
         "schema_version": SCHEMA_VERSION,
         "protocol_version": 7,
         "artifact_class": ARTIFACT_CLASS,
@@ -1030,6 +1053,9 @@ def validate_pilot(
         "integrity_failures": integrity,
         "threshold_failures": thresholds,
     }
+    if recovery is not None:
+        report["health_compatibility_recovery"] = recovery
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:

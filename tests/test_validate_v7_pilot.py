@@ -13,7 +13,60 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import validate_v7_pilot as validator
 
+from talif_msresnet import pilot_v7
 from talif_msresnet.config import load_protocol
+
+
+def test_recovered_health_plan_binds_execution_and_recovery_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    protocol_path = tmp_path / "protocol.yaml"
+    protocol_path.write_text("protocol_version: 7\n", encoding="utf-8")
+    health_path = tmp_path / "health.json"
+    receipt_path = tmp_path / "health.attempt.json"
+    health_path.write_text("{}\n", encoding="utf-8")
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    recovery = {
+        "base_health_commit": "1" * 40,
+        "recovery_commit": "2" * 40,
+    }
+    block = SimpleNamespace(
+        protocol_hash="a" * 64,
+        acceptance_hash="b" * 64,
+        block_hash="c" * 64,
+        health_output=health_path,
+        attempt_receipt=receipt_path,
+        dataset="cifar100",
+        pilot_seed=1_673_127_435,
+        health_seed=1_068_798_027,
+        conditions=("M0", "M1", "M2", "M3", "M4", "PLIF"),
+        pilot_output_root=tmp_path / "pilot",
+        formal_output_root=tmp_path / "formal",
+    )
+    monkeypatch.setattr(pilot_v7, "validate_v7_protocol_from_path", lambda _path: {})
+    monkeypatch.setattr(pilot_v7, "expected_pilot_configs", lambda _protocol: ())
+    monkeypatch.setattr(
+        pilot_v7,
+        "validate_health_recovery_release",
+        lambda *_args, **_kwargs: dict(recovery),
+    )
+
+    plan = pilot_v7.expected_pilot_plan_payload(
+        block=block,
+        protocol_path=protocol_path,
+        config_dir=tmp_path / "configs",
+        manifest_rows=(),
+        health_report={
+            "git_commit": recovery["base_health_commit"],
+            "compatibility_recovery": recovery,
+            "environment": {"training_environment_sha256": "d" * 64},
+        },
+        repository_root=tmp_path,
+    )
+
+    assert plan["git_commit"] == recovery["recovery_commit"]
+    assert plan["health_execution_git_commit"] == recovery["base_health_commit"]
+    assert plan["health_compatibility_recovery"] == recovery
 
 
 def _history() -> list[dict[str, Any]]:
@@ -149,6 +202,10 @@ def test_validate_pilot_aggregate_exposes_freeze_consumer_fields(
         block_hash="b" * 64,
         pilot_output_root=output_root,
     )
+    recovery = {
+        "schema": "ta-lif-msresnet-v7-health-compatibility-recovery-release-v1",
+        "recovery_commit": "e" * 40,
+    }
 
     monkeypatch.setattr(validator, "load_protocol", lambda _path: protocol)
     monkeypatch.setattr(validator, "require_v7_author_freeze", lambda *_args, **_kwargs: {})
@@ -164,7 +221,10 @@ def test_validate_pilot_aggregate_exposes_freeze_consumer_fields(
     monkeypatch.setattr(
         validator,
         "_bound_evidence",
-        lambda **_kwargs: ({"health": {}}, []),
+        lambda **_kwargs: (
+            {"health": {}, "health_compatibility_recovery": recovery},
+            [],
+        ),
     )
     monkeypatch.setattr(validator, "_aggregate_metrics_csv_failures", lambda *_args: [])
 
@@ -187,9 +247,80 @@ def test_validate_pilot_aggregate_exposes_freeze_consumer_fields(
     assert report["decision"] == validator.PASS_DECISION
     assert report["artifact_class"] == validator.ARTIFACT_CLASS
     assert report["training_environment_sha256"] == environment_hash
+    assert report["health_compatibility_recovery"] == recovery
     dataset = report["datasets"]["cifar100"]
     assert dataset["environment_sha256"] == environment_hash
+    assert dataset["health_compatibility_recovery"] == recovery
     assert list(dataset["runs"]) == conditions
+
+
+def test_orchestrator_evidence_requires_identical_health_recovery_binding() -> None:
+    recovery = {"schema": "sealed-v7-test", "recovery_commit": "e" * 40}
+    block = SimpleNamespace(
+        protocol_hash="1" * 64,
+        acceptance_hash="2" * 64,
+        block_hash="3" * 64,
+        dataset="cifar100",
+        health_seed=1068798027,
+        pilot_seed=1673127435,
+    )
+    bound = {
+        "health_path": "results/pilot/v7_mechanism/health.json",
+        "health_sha256": "4" * 64,
+        "attempt_receipt_path": "results/pilot/v7_mechanism/health.attempt.json",
+        "attempt_receipt_sha256": "5" * 64,
+        "plan_path": "environment/v7-plan.json",
+        "plan_sha256": "6" * 64,
+        "plan": {"git_commit": "e" * 40},
+        "health_compatibility_recovery": recovery,
+    }
+    evidence = {
+        "protocol_version": 7,
+        "execution_stage": "pilot",
+        "plan_version": 7,
+        "protocol_hash": block.protocol_hash,
+        "acceptance_hash": block.acceptance_hash,
+        "block_hash": block.block_hash,
+        "dataset": block.dataset,
+        "health_seed": block.health_seed,
+        "pilot_seed": block.pilot_seed,
+        "health_report": bound["health_path"],
+        "health_report_sha256": bound["health_sha256"],
+        "attempt_receipt": bound["attempt_receipt_path"],
+        "attempt_receipt_sha256": bound["attempt_receipt_sha256"],
+        "pilot_plan": bound["plan_path"],
+        "pilot_plan_sha256": bound["plan_sha256"],
+        "git_commit": "e" * 40,
+        "runtime_context": {
+            "pass": True,
+            "protocol_version": 7,
+            "dataset": block.dataset,
+            "health_seed": block.health_seed,
+            "pilot_seed": block.pilot_seed,
+            "block_hash": block.block_hash,
+            "training_environment_sha256": "7" * 64,
+            "health_compatibility_recovery": recovery,
+        },
+    }
+
+    assert validator._orchestrator_failures(
+        evidence,
+        block=block,
+        bound=bound,
+        environment_hash="7" * 64,
+    ) == []
+
+    evidence["runtime_context"]["health_compatibility_recovery"] = {
+        **recovery,
+        "recovery_commit": "f" * 40,
+    }
+    failures = validator._orchestrator_failures(
+        evidence,
+        block=block,
+        bound=bound,
+        environment_hash="7" * 64,
+    )
+    assert any("health compatibility recovery" in item for item in failures)
 
 
 def test_main_refuses_to_overwrite_canonical_validation(

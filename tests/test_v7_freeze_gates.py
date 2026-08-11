@@ -16,6 +16,19 @@ sys.path.insert(0, str(ROOT / "src"))
 import talif_msresnet.freeze as freeze_module
 from talif_msresnet.config_v7 import V7_ACTIVE_CONDITIONS, V7_FORMAL_SEEDS
 from talif_msresnet.freeze import FreezeGateError
+from talif_msresnet.pilot_v7 import (
+    V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_HEALTH_RECOVERY_ATTEMPT_PATH,
+    V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+    V7_HEALTH_RECOVERY_BASE_COMMIT,
+    V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+    V7_HEALTH_RECOVERY_HEALTH_PATH,
+    V7_HEALTH_RECOVERY_HEALTH_SHA256,
+    V7_HEALTH_RECOVERY_PROTOCOL_HASH,
+    V7_HEALTH_RECOVERY_RELEASE_RECORD,
+    V7_HEALTH_RECOVERY_SCHEMA,
+    V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
+)
 
 
 def _load_freeze_tool():
@@ -37,11 +50,40 @@ def _v7_protocol() -> dict[str, Any]:
     return copy.deepcopy(tool.load_protocol(V7_PROTOCOL_PATH))
 
 
+def _v7_recovery(*, recovery_commit: str = "f" * 40) -> dict[str, Any]:
+    return {
+        "schema": V7_HEALTH_RECOVERY_SCHEMA,
+        "base_health_commit": V7_HEALTH_RECOVERY_BASE_COMMIT,
+        "implementation_commit": "d" * 40,
+        "implementation_tree": "a" * 40,
+        "recovery_commit": recovery_commit,
+        "health_report_path": V7_HEALTH_RECOVERY_HEALTH_PATH,
+        "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+        "attempt_receipt_path": V7_HEALTH_RECOVERY_ATTEMPT_PATH,
+        "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+        "protocol_hash": V7_HEALTH_RECOVERY_PROTOCOL_HASH,
+        "corrected_field": V7_HEALTH_RECOVERY_CORRECTED_FIELD,
+        "split_source_fingerprint": V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
+        "allowed_changed_paths": list(V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS),
+        "observed_changes": [
+            f"M\t{path}" for path in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+        ],
+        "implementation_file_sha256": {
+            path: "9" * 64 for path in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
+        },
+        "release_record": V7_HEALTH_RECOVERY_RELEASE_RECORD,
+        "record_sha256": "c" * 64,
+        "release_record_sha256": "b" * 64,
+        "tracked_clean": True,
+    }
+
+
 def _v7_pass_report(
     protocol: dict[str, Any], *, protocol_file_sha256: str
 ) -> dict[str, Any]:
     acceptance = protocol["pilot_acceptance"]
     environment = "e" * 64
+    recovery = _v7_recovery()
     return {
         "schema_version": 1,
         "protocol_version": 7,
@@ -68,6 +110,7 @@ def _v7_pass_report(
             "minimum_late_to_best_ratio": 0.75,
         },
         "training_environment_sha256": environment,
+        "health_compatibility_recovery": recovery,
         "failure_action": acceptance["run_handling"]["failure_action"],
         "fallback": None,
         "datasets": {
@@ -80,9 +123,9 @@ def _v7_pass_report(
                 "block_hash": "4" * 64,
                 "results_root": acceptance["pilot_output_root"],
                 "health_report_path": acceptance["health_output"],
-                "health_report_sha256": "5" * 64,
+                "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
                 "attempt_receipt_path": acceptance["attempt_receipt"],
-                "attempt_receipt_sha256": "6" * 64,
+                "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
                 "pilot_plan_path": acceptance["pilot_plan"],
                 "pilot_plan_sha256": "7" * 64,
                 "environment_sha256": environment,
@@ -103,6 +146,7 @@ def _v7_pass_report(
                 },
                 "integrity_failures": [],
                 "threshold_failures": [],
+                "health_compatibility_recovery": recovery,
             }
         },
         "integrity_failures": [],
@@ -161,9 +205,16 @@ def test_v7_signoff_uses_the_accountable_author_contract() -> None:
     assert confirmation["responsible_author"] == "Yanzhao Deng"
 
 
-def test_v7_pilot_acceptance_is_revalidated_and_bound(tmp_path: Path) -> None:
+def test_v7_pilot_acceptance_is_revalidated_and_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     protocol = _v7_protocol()
     project, protocol_path, report = _write_v7_validation_fixture(tmp_path, protocol)
+    monkeypatch.setattr(
+        tool,
+        "validate_health_recovery_release",
+        lambda *_args, **_kwargs: report["health_compatibility_recovery"],
+    )
 
     bound = tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
 
@@ -172,6 +223,9 @@ def test_v7_pilot_acceptance_is_revalidated_and_bound(tmp_path: Path) -> None:
     assert bound["protocol_file_sha256"] == report["protocol_file_sha256"]
     assert bound["pilot_matrix_manifest_sha256"] == "2" * 64
     assert bound["pilot_run_manifest_csv_sha256"] == "3" * 64
+    assert bound["health_compatibility_recovery"] == report[
+        "health_compatibility_recovery"
+    ]
     assert set(bound["datasets"]) == {"cifar100"}
 
 
@@ -208,9 +262,27 @@ def test_v7_pilot_acceptance_rejects_modified_validation(tmp_path: Path) -> None
         tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
 
 
+def test_v7_pilot_acceptance_rejects_unsealed_recovery_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    protocol = _v7_protocol()
+    project, protocol_path, report = _write_v7_validation_fixture(tmp_path, protocol)
+    verified = copy.deepcopy(report["health_compatibility_recovery"])
+    verified["record_sha256"] = "0" * 64
+    monkeypatch.setattr(
+        tool,
+        "validate_health_recovery_release",
+        lambda *_args, **_kwargs: verified,
+    )
+
+    with pytest.raises(tool.FreezeManifestError, match="differs from the sealed"):
+        tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
+
+
 def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
     protocol_hash = tool._stable_hash(protocol)
     environment = "e" * 64
+    recovery = _v7_recovery()
     pilot = {
         "artifact_class": "NON_REPORTABLE_V7_MECHANISM_PILOT_ACCEPTANCE",
         "status": "PASS",
@@ -226,6 +298,7 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
         "pilot_matrix_manifest_sha256": "2" * 64,
         "pilot_run_manifest_csv_sha256": "3" * 64,
         "validator": {"path": "scripts/validate_v7_pilot.py", "sha256": "b" * 64},
+        "health_compatibility_recovery": recovery,
         "datasets": {
             "cifar100": {
                 "status": "PASS",
@@ -236,8 +309,8 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
                 "environment_sha256": environment,
                 "shared_weight_sha256": "5" * 64,
                 "split_manifest_sha256": "6" * 64,
-                "health_report_sha256": "7" * 64,
-                "attempt_receipt_sha256": "8" * 64,
+                "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+                "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
                 "pilot_plan_sha256": "9" * 64,
             }
         },
@@ -266,7 +339,10 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
             path: {
                 "path": path,
                 "file_sha256": (
-                    "b" * 64 if path == "scripts/validate_v7_pilot.py" else "c" * 64
+                    "b" * 64
+                    if path
+                    in {"scripts/validate_v7_pilot.py", V7_HEALTH_RECOVERY_RELEASE_RECORD}
+                    else "c" * 64
                 ),
             }
             for path in freeze_module.V7_GATE_SOURCE_PATHS
@@ -338,6 +414,18 @@ def test_runtime_v7_formal_gate_requires_exact_pilot_matrix_and_sources(
                 {"pilot_matrix_manifest_sha256": "bad"}
             ),
             "pilot validation/matrix hash",
+        ),
+        (
+            lambda stored: stored["pilot_validation"][
+                "health_compatibility_recovery"
+            ].update({"health_report_sha256": "0" * 64}),
+            "sealed health compatibility recovery",
+        ),
+        (
+            lambda stored: stored["pilot_validation"][
+                "health_compatibility_recovery"
+            ].update({"corrected_field": "source.other"}),
+            "sealed health compatibility recovery",
         ),
     ],
 )
