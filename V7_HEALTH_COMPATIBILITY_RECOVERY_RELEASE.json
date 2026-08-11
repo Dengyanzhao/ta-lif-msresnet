@@ -1,0 +1,36 @@
+{
+  "schema": "ta-lif-msresnet-v7-health-compatibility-recovery-release-v1",
+  "base_health_commit": "de2c3bf295624e9d83caf67a078b830d51208861",
+  "implementation_commit": "ecfee1c7ed12e55dac8acf000b60ad16ca4eb8de",
+  "implementation_tree": "4a794b5f2f3047d8888a4bf354961266168a6c24",
+  "health_report_path": "results/pilot/v7_mechanism/health_cifar100_s1068798027.json",
+  "health_report_sha256": "2419a7241dba1b95ee96757c362aee00e50bdeb9a201b90db5e287a0fbc53c56",
+  "attempt_receipt_path": "results/pilot/v7_mechanism/health_cifar100_s1068798027.attempt.json",
+  "attempt_receipt_sha256": "26f02b0df23b99354d90a76f4df63f78a949cf0a7216541b511d075c067c8281",
+  "protocol_hash": "ce8240e28147a87ee76a3953f8097613ecc33d683339ad66d9e73a126104265c",
+  "corrected_field": "source.split_source_fingerprint",
+  "split_source_fingerprint": "cifar100:50000",
+  "allowed_changed_paths": [
+    "V7_MECHANISM_5090_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/pilot_health_gate_v7.py",
+    "scripts/validate_v7_pilot.py",
+    "src/talif_msresnet/freeze.py",
+    "src/talif_msresnet/pilot_v7.py",
+    "tests/test_v7_freeze_gates.py",
+    "tests/test_v7_health_gate.py",
+    "tests/test_validate_v7_pilot.py"
+  ],
+  "implementation_file_sha256": {
+    "V7_MECHANISM_5090_RUNBOOK.md": "5a4619c0d4631530399183d0623afe8d7a49bfd7b2725cbb887f5b33621a7ee9",
+    "scripts/create_freeze_manifest.py": "ed0acd2e13db253f2a0d48774bb22f987596f19fef5049e859ddf739e5774228",
+    "scripts/pilot_health_gate_v7.py": "d7f6a0a1e314c5adfa5236e482ce9d467b319d938a0d63837ead6d46758cf1e2",
+    "scripts/validate_v7_pilot.py": "c2494f59574c0fde43fc28ab12408e37bf5bd9c9fca46389549924fd7bfbd08b",
+    "src/talif_msresnet/freeze.py": "b1a1445b012e5e75251699574c29a81496cf7c61a95e9bbe5b0f52b4070af50b",
+    "src/talif_msresnet/pilot_v7.py": "c68101cabfd2e27584f5263759d7bd2d13ff8684a2826270997733e9e53d7fbe",
+    "tests/test_v7_freeze_gates.py": "d0d48dff0aa0d533c27569b37b43786b818c7f28fc4129144bdd8989f453646c",
+    "tests/test_v7_health_gate.py": "ab6ea7243e896eaf6e52ae7dca15c92c7f350c16038cb8b00dcc95dd2b5e2738",
+    "tests/test_validate_v7_pilot.py": "3407b94c116d6fec004b9cacdfde9c65ed80a3a406069ea4fb0a018cb05c0c8d"
+  },
+  "record_sha256": "90bfe9df644d7f6f5c2466562a5e24b7893997f88b77c3d02a217576d219e73b"
+}
