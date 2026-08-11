@@ -97,6 +97,7 @@ set -o pipefail
   df -h /hy-tmp
   nvidia-smi
   sha256sum -c ta-lif-msresnet-v7-instance-input.tar.gz.sha256
+  test ! -e /hy-tmp/ta-lif-msresnet-v7-instance-input
   tar -xzf ta-lif-msresnet-v7-instance-input.tar.gz
   INPUT=/hy-tmp/ta-lif-msresnet-v7-instance-input
   (cd "$INPUT" && sha256sum -c SHA256SUMS.txt)
