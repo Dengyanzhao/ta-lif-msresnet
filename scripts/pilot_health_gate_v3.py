@@ -80,7 +80,16 @@ def _resolved_data_config(config: RunConfig) -> RunConfig:
         return str(_repository_path(value)) if value else None
 
     root = _repository_path(data.root)
-    split_manifest = _repository_path(data.split_manifest)
+    try:
+        split_manifest_value = str(data.split_manifest).format(
+            dataset=data.dataset,
+            split_seed=data.split_seed,
+        )
+    except (KeyError, IndexError, ValueError) as exc:
+        raise PilotV3Error(
+            f"Invalid split manifest template {data.split_manifest!r}: {exc}"
+        ) from exc
+    split_manifest = _repository_path(split_manifest_value)
     if not root.exists():
         raise PilotV3Error(f"Dataset root is missing: {root}")
     if not split_manifest.is_file():

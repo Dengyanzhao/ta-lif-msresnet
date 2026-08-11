@@ -35,6 +35,32 @@ def _development_config(condition: str) -> Any:
     )
 
 
+def test_v6_preclaim_resolves_frozen_split_manifest_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_root = tmp_path / "data" / "cifar100"
+    dataset_root.mkdir(parents=True)
+    manifest_path = tmp_path / "data" / "manifests" / "cifar100_seed2024.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}\n", encoding="utf-8")
+    config = _development_config("M0")
+    config = dataclasses.replace(
+        config,
+        data=dataclasses.replace(
+            config.data,
+            root="data/cifar100",
+            split_manifest="data/manifests/{dataset}_seed{split_seed}.json",
+        ),
+    )
+    monkeypatch.setattr(gate.v3_gate, "REPOSITORY_ROOT", tmp_path)
+
+    resolved = gate.v3_gate._resolved_data_config(config)
+
+    assert Path(resolved.data.root) == dataset_root.resolve()
+    assert Path(resolved.data.split_manifest) == manifest_path.resolve()
+    assert "{" not in resolved.data.split_manifest
+
+
 def test_v6_initial_forward_is_bitwise_equivalent_on_cpu() -> None:
     configs = [_development_config(condition) for condition in gate.V6_ACTIVE_CONDITIONS]
     generator = torch.Generator().manual_seed(99)
