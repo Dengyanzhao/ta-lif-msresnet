@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the one-shot, non-reportable V6 six-condition health gate."""
+"""Run the one-shot, non-reportable V7 six-condition health gate."""
 
 from __future__ import annotations
 
@@ -39,28 +39,31 @@ from talif_msresnet.config import (
     load_protocol,
     load_run_config,
 )
-from talif_msresnet.config_v6 import (
-    V6_ACTIVE_CONDITIONS,
-    validate_v6_cifar100_provenance_files,
+from talif_msresnet.config_v7 import (
+    V7_ACTIVE_CONDITIONS,
+    validate_v7_cifar100_provenance_files,
 )
 from talif_msresnet.data import build_loaders
 from talif_msresnet.models import build_model
 from talif_msresnet.pathing import artifact_path_reference
 from talif_msresnet.pilot_v3 import repository_git_identity
-from talif_msresnet.pilot_v6 import (
+from talif_msresnet.pilot_v7 import (
     HEALTH_ARTIFACT_CLASS,
     HEALTH_SCHEMA_VERSION,
     HEALTH_SEED_DISPOSITION,
     PILOT_SEED_DISPOSITION,
     REPORTING_ELIGIBILITY,
+    V7_HEALTH_RUNTIME_SOURCE_PATHS,
     PilotBlock,
-    PilotV6Error,
+    PilotV7Error,
     attempt_receipt_payload,
     exclusive_create_json,
     expected_pilot_configs,
-    require_v6_author_freeze,
+    health_source_binding,
+    json_file_payload_sha256,
+    require_v7_author_freeze,
     resolve_pilot_block,
-    validate_v6_runtime_environment,
+    validate_v7_runtime_environment,
 )
 from talif_msresnet.train import (
     _checkpoint_payload,
@@ -83,21 +86,8 @@ from talif_msresnet.utils import (
 )
 
 ADAPTIVE_CONDITIONS = frozenset({"M2", "M3", "M4", "PLIF"})
-RUNTIME_SOURCE_PATHS = (
-    Path(__file__),
-    REPOSITORY_ROOT / "scripts" / "pilot_health_gate.py",
-    REPOSITORY_ROOT / "scripts" / "pilot_health_gate_v3.py",
-    REPOSITORY_ROOT / "scripts" / "validate_v6_pilot.py",
-    REPOSITORY_ROOT / "scripts" / "generate_run_configs.py",
-    REPOSITORY_ROOT / "scripts" / "run_matrix.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "config.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "config_v6.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "data.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "models.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "neurons.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "pilot_v6.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "train.py",
-    REPOSITORY_ROOT / "src" / "talif_msresnet" / "utils.py",
+RUNTIME_SOURCE_PATHS = tuple(
+    REPOSITORY_ROOT / relative for relative in V7_HEALTH_RUNTIME_SOURCE_PATHS
 )
 
 
@@ -111,14 +101,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--protocol",
         type=Path,
-        default=REPOSITORY_ROOT / "configs" / "protocol_v6_mechanism.yaml",
+        default=REPOSITORY_ROOT / "configs" / "protocol_v7_mechanism.yaml",
     )
     parser.add_argument("--config-dir", type=Path)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--precheck-only",
         action="store_true",
-        help="Run reversible V6 health setup checks without claiming the health seed.",
+        help="Run reversible V7 health setup checks without claiming the health seed.",
     )
     return parser
 
@@ -183,7 +173,7 @@ def _runtime_source_hashes() -> dict[str, str]:
     for path in RUNTIME_SOURCE_PATHS:
         resolved = path.resolve()
         if not resolved.is_file():
-            raise PilotV6Error(f"Required V6 runtime source is missing: {resolved}")
+            raise PilotV7Error(f"Required V7 runtime source is missing: {resolved}")
         result[artifact_path_reference(resolved, REPOSITORY_ROOT)] = sha256_file(resolved)
     return result
 
@@ -196,7 +186,7 @@ def _require_head_bound_sources(paths: Sequence[Path]) -> None:
         try:
             relative.append(path.relative_to(root).as_posix())
         except ValueError as exc:
-            raise PilotV6Error(f"Runtime source escapes the repository: {path}") from exc
+            raise PilotV7Error(f"Runtime source escapes the repository: {path}") from exc
     tracked = subprocess.run(
         ["git", "ls-files", "--error-unmatch", "--", *relative],
         cwd=root,
@@ -206,7 +196,7 @@ def _require_head_bound_sources(paths: Sequence[Path]) -> None:
     )
     if tracked.returncode != 0:
         detail = tracked.stderr.strip() or tracked.stdout.strip()
-        raise PilotV6Error(f"V6 runtime inputs must be committed: {detail}")
+        raise PilotV7Error(f"V7 runtime inputs must be committed: {detail}")
     unchanged = subprocess.run(
         ["git", "diff", "--quiet", "HEAD", "--", *relative],
         cwd=root,
@@ -215,10 +205,10 @@ def _require_head_bound_sources(paths: Sequence[Path]) -> None:
         check=False,
     )
     if unchanged.returncode == 1:
-        raise PilotV6Error("V6 runtime inputs differ from the current HEAD")
+        raise PilotV7Error("V7 runtime inputs differ from the current HEAD")
     if unchanged.returncode != 0:
         detail = unchanged.stderr.strip() or unchanged.stdout.strip()
-        raise PilotV6Error(f"Cannot bind V6 runtime inputs to HEAD: {detail}")
+        raise PilotV7Error(f"Cannot bind V7 runtime inputs to HEAD: {detail}")
 
 
 def _require_runtime_sources_unchanged(
@@ -226,11 +216,11 @@ def _require_runtime_sources_unchanged(
 ) -> dict[str, Any]:
     current = repository_git_identity(REPOSITORY_ROOT)
     if current.get("git_commit") != expected_git.get("git_commit"):
-        raise PilotV6Error("Git commit changed during the one-shot V6 health gate")
+        raise PilotV7Error("Git commit changed during the one-shot V7 health gate")
     if current.get("tracked_clean") is not True:
-        raise PilotV6Error("Tracked files changed during the one-shot V6 health gate")
+        raise PilotV7Error("Tracked files changed during the one-shot V7 health gate")
     if _runtime_source_hashes() != dict(expected):
-        raise PilotV6Error("A V6 runtime source changed during the one-shot health gate")
+        raise PilotV7Error("A V7 runtime source changed during the one-shot health gate")
     return current
 
 
@@ -243,16 +233,16 @@ def _load_exact_configs(
     for config in expected:
         path = (config_dir / f"{config.runtime.run_id}.yaml").resolve()
         if path.parent != config_dir.resolve() or not path.is_file():
-            raise PilotV6Error(f"Canonical V6 pilot config is missing: {path}")
+            raise PilotV7Error(f"Canonical V7 pilot config is missing: {path}")
         loaded = load_run_config(path, protocol_path)
         if loaded.as_dict() != config.as_dict():
-            raise PilotV6Error(
-                f"Generated V6 pilot YAML differs from protocol for {config.model.condition}"
+            raise PilotV7Error(
+                f"Generated V7 pilot YAML differs from protocol for {config.model.condition}"
             )
         paths.append(path)
         observed.append(loaded)
-    if tuple(config.model.condition for config in observed) != V6_ACTIVE_CONDITIONS:
-        raise PilotV6Error("V6 health configs are not the ordered six-condition block")
+    if tuple(config.model.condition for config in observed) != V7_ACTIVE_CONDITIONS:
+        raise PilotV7Error("V7 health configs are not the ordered six-condition block")
     return tuple(paths), tuple(observed)
 
 
@@ -264,13 +254,32 @@ def _configure_deterministic_runtime() -> None:
     try:
         torch.use_deterministic_algorithms(True)
     except (AttributeError, TypeError) as exc:  # pragma: no cover - old torch only
-        raise PilotV6Error(
-            "PyTorch cannot enable deterministic algorithms for the V6 preclaim gate"
+        raise PilotV7Error(
+            "PyTorch cannot enable deterministic algorithms for the V7 preclaim gate"
         ) from exc
     if not torch.are_deterministic_algorithms_enabled() or (
         torch.is_deterministic_algorithms_warn_only_enabled()
     ):
-        raise PilotV6Error("V6 preclaim deterministic runtime is not strict")
+        raise PilotV7Error("V7 preclaim deterministic runtime is not strict")
+
+
+def _expected_adaptive_updates(
+    health_contract: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Read the condition-update expectations from the frozen V7 contract."""
+
+    raw = health_contract.get("expected_adaptive_update_by_condition")
+    if not isinstance(raw, Mapping):
+        raise PilotV7Error(
+            "V7 health contract has no expected_adaptive_update_by_condition mapping"
+        )
+    if tuple(raw) != V7_ACTIVE_CONDITIONS:
+        raise PilotV7Error(
+            "V7 expected adaptive-update mapping differs from the frozen condition order"
+        )
+    if any(not isinstance(raw[condition], bool) for condition in V7_ACTIVE_CONDITIONS):
+        raise PilotV7Error("V7 adaptive-update expectations must be boolean")
+    return {condition: bool(raw[condition]) for condition in V7_ACTIVE_CONDITIONS}
 
 
 def _preclaim_gate(
@@ -281,6 +290,7 @@ def _preclaim_gate(
     device_name: str,
     git_identity: Mapping[str, Any],
     runtime_sources: Mapping[str, str],
+    source_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Run all reversible runtime/data checks before claiming the health seed.
 
@@ -290,19 +300,19 @@ def _preclaim_gate(
     """
 
     if tuple(config.model.condition for config in configs) != block.conditions:
-        raise PilotV6Error("V6 preclaim configs do not cover the frozen condition order")
+        raise PilotV7Error("V7 preclaim configs do not cover the frozen condition order")
     if any(config.runtime.seed != block.pilot_seed for config in configs):
-        raise PilotV6Error("V6 preclaim reference configs must retain the pilot seed")
+        raise PilotV7Error("V7 preclaim reference configs must retain the pilot seed")
     if any(not config.runtime.deterministic or config.runtime.amp for config in configs):
-        raise PilotV6Error("V6 preclaim requires deterministic float32 configs")
+        raise PilotV7Error("V7 preclaim requires deterministic float32 configs")
     if not isinstance(device_name, str) or not device_name.strip():
-        raise PilotV6Error("V6 health gate requires an explicit CUDA device")
+        raise PilotV7Error("V7 health gate requires an explicit CUDA device")
     try:
         device = torch.device(device_name)
     except (RuntimeError, TypeError, ValueError) as exc:
-        raise PilotV6Error(f"Invalid V6 CUDA device {device_name!r}: {exc}") from exc
+        raise PilotV7Error(f"Invalid V7 CUDA device {device_name!r}: {exc}") from exc
     if device.type != "cuda" or device.index is None:
-        raise PilotV6Error("V6 health preclaim requires an explicit CUDA device such as cuda:0")
+        raise PilotV7Error("V7 health preclaim requires an explicit CUDA device such as cuda:0")
 
     environment_contract = protocol["pilot_acceptance"]["environment"]
     _configure_deterministic_runtime()
@@ -310,44 +320,73 @@ def _preclaim_gate(
         device, str(environment_contract["expected_gpu_substring"])
     )
     legacy_gate.validate_runtime_environment(environment_contract, hardware)
-    validate_v6_runtime_environment(environment_contract)
+    validate_v7_runtime_environment(environment_contract)
     expected_cublas = str(environment_contract["cublas_workspace_config"])
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != expected_cublas:
-        raise PilotV6Error("CUBLAS_WORKSPACE_CONFIG differs from the V6 environment contract")
+        raise PilotV7Error("CUBLAS_WORKSPACE_CONFIG differs from the V7 environment contract")
     idle = legacy_gate.gpu_idle_precheck(device)
     environment_text, environment_sha256 = _training_environment_identity(
         device, amp=False, deterministic=True
     )
     environment_identity = json.loads(environment_text)
     if not _finite_tree(environment_identity):
-        raise PilotV6Error("V6 preclaim environment identity contains non-finite values")
+        raise PilotV7Error("V7 preclaim environment identity contains non-finite values")
     if repository_git_identity(REPOSITORY_ROOT) != dict(git_identity):
-        raise PilotV6Error("Git identity changed before the V6 health claim")
+        raise PilotV7Error("Git identity changed before the V7 health claim")
     if _runtime_source_hashes() != dict(runtime_sources):
-        raise PilotV6Error("V6 runtime source hashes changed before the health claim")
+        raise PilotV7Error("V7 runtime source hashes changed before the health claim")
 
     if configs[0].data.dataset != "cifar100":
-        raise PilotV6Error("V6 preclaim loader must be bound to CIFAR-100")
+        raise PilotV7Error("V7 preclaim loader must be bound to CIFAR-100")
     try:
-        cifar100_provenance = validate_v6_cifar100_provenance_files(
+        cifar100_provenance = validate_v7_cifar100_provenance_files(
             protocol,
             project_root=REPOSITORY_ROOT,
         )
     except ValueError as exc:
-        raise PilotV6Error(
-            f"V6 preclaim CIFAR-100 provenance differs from the frozen protocol: {exc}"
+        raise PilotV7Error(
+            f"V7 preclaim CIFAR-100 provenance differs from the frozen protocol: {exc}"
         ) from exc
     health_contract = protocol["pilot_acceptance"]["health"]
     required_batch = int(health_contract["fixed_batch_size"])
     _resolved, inputs, targets, split_manifest, source_identity = _load_fixed_health_batch(
         configs[0], seed=block.health_seed, required_batch_size=required_batch
     )
+    (
+        _reconstructed,
+        reconstructed_inputs,
+        reconstructed_targets,
+        reconstructed_manifest,
+        reconstructed_source_identity,
+    ) = _load_fixed_health_batch(
+        configs[0], seed=block.health_seed, required_batch_size=required_batch
+    )
     if int(inputs.shape[0]) != required_batch or int(targets.shape[0]) != required_batch:
-        raise PilotV6Error("V6 preclaim fixed batch does not have the frozen size")
+        raise PilotV7Error("V7 preclaim fixed batch does not have the frozen size")
     if not torch.isfinite(inputs).all().item() or targets.dtype != torch.long:
-        raise PilotV6Error("V6 preclaim fixed batch is non-finite or has invalid labels")
+        raise PilotV7Error("V7 preclaim fixed batch is non-finite or has invalid labels")
     if not isinstance(split_manifest, Mapping) or not split_manifest.get("manifest_sha256"):
-        raise PilotV6Error("V6 preclaim loader did not return a split manifest")
+        raise PilotV7Error("V7 preclaim loader did not return a split manifest")
+    if not isinstance(reconstructed_manifest, Mapping) or not isinstance(
+        reconstructed_source_identity, Mapping
+    ):
+        raise PilotV7Error("V7 preclaim reconstruction returned invalid source evidence")
+    fixed_batch_sha256 = legacy_gate.tensor_batch_sha256(inputs, targets)
+    reconstructed_batch_sha256 = legacy_gate.tensor_batch_sha256(
+        reconstructed_inputs, reconstructed_targets
+    )
+    if reconstructed_batch_sha256 != fixed_batch_sha256:
+        raise PilotV7Error(
+            "V7 preclaim fixed batch cannot be reconstructed exactly before seed claim"
+        )
+    if dict(reconstructed_manifest) != dict(split_manifest):
+        raise PilotV7Error(
+            "V7 preclaim split manifest changed between fixed-batch reconstructions"
+        )
+    if dict(reconstructed_source_identity) != dict(source_identity):
+        raise PilotV7Error(
+            "V7 preclaim source identity changed between fixed-batch reconstructions"
+        )
 
     # Explicitly touch the validation loader without opening the held-out test split.
     resolved_data = v3_gate._resolved_data_config(configs[0])
@@ -359,10 +398,10 @@ def _preclaim_gate(
     )
     loaders = build_loaders(resolved_data, final_test=False, seed=block.health_seed)
     if "test" in loaders or "val" not in loaders:
-        raise PilotV6Error("V6 preclaim unexpectedly touched or omitted validation")
+        raise PilotV7Error("V7 preclaim unexpectedly touched or omitted validation")
     validation_loader = loaders["val"]
     if len(validation_loader) < 1:
-        raise PilotV6Error("V6 preclaim validation loader is empty")
+        raise PilotV7Error("V7 preclaim validation loader is empty")
     validation_batch = next(iter(validation_loader))
     if (
         not isinstance(validation_batch, (tuple, list))
@@ -370,13 +409,12 @@ def _preclaim_gate(
         or int(validation_batch[0].shape[0]) < 1
         or not torch.isfinite(torch.as_tensor(validation_batch[0])).all().item()
     ):
-        raise PilotV6Error("V6 preclaim validation loader yielded an invalid batch")
+        raise PilotV7Error("V7 preclaim validation loader yielded an invalid batch")
     validation_manifest = loaders.get("_manifest")
     if not isinstance(validation_manifest, Mapping) or (
         validation_manifest.get("manifest_sha256") != split_manifest.get("manifest_sha256")
     ):
-        raise PilotV6Error("V6 preclaim validation split differs from fixed batch")
-    fixed_batch_sha256 = legacy_gate.tensor_batch_sha256(inputs, targets)
+        raise PilotV7Error("V7 preclaim validation split differs from fixed batch")
     return {
         "pass": True,
         "device": str(device),
@@ -386,11 +424,14 @@ def _preclaim_gate(
         "training_environment_sha256": environment_sha256,
         "split_manifest_sha256": split_manifest["manifest_sha256"],
         "fixed_batch_sha256": fixed_batch_sha256,
+        "fixed_batch_reconstruction_sha256": reconstructed_batch_sha256,
+        "fixed_batch_reconstruction_count": 2,
         "fixed_batch_shape": list(inputs.shape),
         "fixed_batch_size": required_batch,
         "validation_batch_shape": list(validation_batch[0].shape),
         "validation_batch_size": int(validation_batch[0].shape[0]),
-        **cifar100_provenance,
+        "source": dict(source_binding),
+        "cifar100_provenance": dict(cifar100_provenance),
         "source_identity": dict(source_identity),
         "runtime_sources_sha256": dict(runtime_sources),
     }
@@ -408,7 +449,7 @@ def _diagnostic_config(
         seed=health_seed,
         device=str(device),
         output_dir=str(output_parent),
-        run_id=f"NONREPORTING_v6_health_{config.model.condition}_s{health_seed}",
+        run_id=f"NONREPORTING_v7_health_{config.model.condition}_s{health_seed}",
         amp=False,
         deterministic=True,
         dry_run=False,
@@ -445,7 +486,7 @@ def _fixed_batch_metrics(
         loss = float(torch.nn.functional.cross_entropy(logits, targets).item())
         accuracy = float((logits.argmax(dim=1) == targets).float().mean().item())
     if not math.isfinite(loss) or not math.isfinite(accuracy):
-        raise PilotV6Error("V6 fixed-batch evaluation produced non-finite metrics")
+        raise PilotV7Error("V7 fixed-batch evaluation produced non-finite metrics")
     return {"loss": loss, "accuracy": accuracy}
 
 
@@ -455,7 +496,7 @@ def _named_gradient_accumulator(
     parameters = dict(model.named_parameters())
     missing = sorted(set(names) - set(parameters))
     if missing:
-        raise PilotV6Error(f"Gradient audit names are absent from the model: {missing}")
+        raise PilotV7Error(f"Gradient audit names are absent from the model: {missing}")
     return {
         name: {
             "probe_count": 0,
@@ -582,7 +623,7 @@ def _fixed_probe(
     )
     expects_adaptive = config.model.condition in ADAPTIVE_CONDITIONS
     if expects_adaptive != bool(adaptive_names):
-        raise PilotV6Error(
+        raise PilotV7Error(
             f"{config.model.condition}: adaptive parameter ownership differs from protocol"
         )
     _set_ta_enabled(adaptive, expects_adaptive)
@@ -682,12 +723,12 @@ def _checkpoint_resume_check(
 ) -> dict[str, Any]:
     seed_everything(config.runtime.seed, deterministic=True)
     if checkpoint_path.name != "last.pt":
-        raise PilotV6Error("V6 checkpoint health evidence must use last.pt")
+        raise PilotV7Error("V7 checkpoint health evidence must use last.pt")
     model, optimizer, scheduler, adaptive, adaptive_names, activation = _build_objects(
         config, device
     )
     if activation != boundary_epoch + 1:
-        raise PilotV6Error(
+        raise PilotV7Error(
             f"{config.model.condition}: activation epoch {activation} does not cross "
             f"checkpoint epoch {boundary_epoch}"
         )
@@ -884,9 +925,9 @@ def _initial_forward_evidence(
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
-    reference = outputs[V6_ACTIVE_CONDITIONS[0]]
+    reference = outputs[V7_ACTIVE_CONDITIONS[0]]
     equivalent = all(
-        torch.equal(reference, outputs[condition]) for condition in V6_ACTIVE_CONDITIONS[1:]
+        torch.equal(reference, outputs[condition]) for condition in V7_ACTIVE_CONDITIONS[1:]
     )
     shared_equal = len(set(shared_hashes.values())) == 1
     return {
@@ -904,9 +945,14 @@ def _condition_health_summary(
     fixed: Mapping[str, Any],
     schedule: Mapping[str, Any],
     resume: Mapping[str, Any],
+    expected_adaptive_update_by_condition: Mapping[str, bool],
 ) -> dict[str, Any]:
     adaptive_names = list(fixed["adaptive_parameter_names"])
-    expects_adaptive = condition in ADAPTIVE_CONDITIONS
+    if condition not in expected_adaptive_update_by_condition:
+        raise PilotV7Error(f"No frozen adaptive-update expectation for {condition}")
+    expects_adaptive = expected_adaptive_update_by_condition[condition]
+    if not isinstance(expects_adaptive, bool):
+        raise PilotV7Error(f"Adaptive-update expectation for {condition} is not boolean")
     expected_states = [False] * 5 + [expects_adaptive]
     finite = bool(fixed["finite"] and schedule["finite"])
     adaptive_update = bool(fixed["adaptive_update"]["nonzero"])
@@ -924,6 +970,7 @@ def _condition_health_summary(
         "resume_exact": bool(resume["resume_exact"]),
         "adaptive_enabled_by_epoch": schedule["adaptive_enabled_by_epoch"],
         "adaptive_parameter_names": adaptive_names,
+        "expected_adaptive_parameter_update_nonzero": expects_adaptive,
         "adaptive_parameter_update_nonzero": adaptive_update,
         "fixed_batch": fixed,
         "formal_schedule_boundary": schedule,
@@ -941,18 +988,21 @@ def run_gate(
     device_name: str,
     git_identity: Mapping[str, Any],
     runtime_sources: Mapping[str, str],
+    source_binding: Mapping[str, Any],
+    attempt_receipt_sha256: str,
     expected_fixed_batch_sha256: str,
 ) -> dict[str, Any]:
     started_at = utc_now()
     started_clock = time.perf_counter()
     health_contract = protocol["pilot_acceptance"]["health"]
+    expected_adaptive_update_by_condition = _expected_adaptive_updates(health_contract)
     environment_contract = protocol["pilot_acceptance"]["environment"]
     if tuple(config.model.condition for config in configs) != block.conditions:
-        raise PilotV6Error("V6 health run does not cover the frozen condition order")
+        raise PilotV7Error("V7 health run does not cover the frozen condition order")
     if any(config.runtime.seed != block.pilot_seed for config in configs):
-        raise PilotV6Error("V6 reference configs must retain the disjoint pilot seed")
+        raise PilotV7Error("V7 reference configs must retain the disjoint pilot seed")
     if any(not config.runtime.deterministic or config.runtime.amp for config in configs):
-        raise PilotV6Error("V6 health requires deterministic float32 reference configs")
+        raise PilotV7Error("V7 health requires deterministic float32 reference configs")
 
     seed_everything(block.health_seed, deterministic=True)
     device = torch.device(device_name)
@@ -960,9 +1010,9 @@ def run_gate(
         device, str(environment_contract["expected_gpu_substring"])
     )
     legacy_gate.validate_runtime_environment(environment_contract, hardware)
-    validate_v6_runtime_environment(environment_contract)
+    validate_v7_runtime_environment(environment_contract)
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != environment_contract["cublas_workspace_config"]:
-        raise PilotV6Error("CUBLAS_WORKSPACE_CONFIG differs from the V6 environment contract")
+        raise PilotV7Error("CUBLAS_WORKSPACE_CONFIG differs from the V7 environment contract")
     idle = legacy_gate.gpu_idle_precheck(device)
     environment_text, environment_sha256 = _training_environment_identity(
         device, amp=False, deterministic=True
@@ -976,10 +1026,19 @@ def run_gate(
     inputs = inputs[:required_batch]
     targets = targets[:required_batch]
     if int(inputs.shape[0]) != required_batch or int(targets.shape[0]) != required_batch:
-        raise PilotV6Error("V6 health loader did not yield the exact frozen batch size")
+        raise PilotV7Error("V7 health loader did not yield the exact frozen batch size")
     fixed_batch_sha256 = legacy_gate.tensor_batch_sha256(inputs, targets)
     if fixed_batch_sha256 != expected_fixed_batch_sha256:
-        raise PilotV6Error("V6 execution fixed batch differs from preclaim")
+        raise PilotV7Error("V7 execution fixed batch differs from preclaim")
+    try:
+        cifar100_provenance = validate_v7_cifar100_provenance_files(
+            protocol,
+            project_root=REPOSITORY_ROOT,
+        )
+    except ValueError as exc:
+        raise PilotV7Error(
+            f"V7 execution CIFAR-100 provenance differs from the frozen protocol: {exc}"
+        ) from exc
     batch = (
         inputs.to(device, non_blocking=False),
         targets.to(device, non_blocking=False),
@@ -997,7 +1056,7 @@ def run_gate(
 
     by_condition: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(
-        prefix="v6-health-", dir=str(block.health_output.parent)
+        prefix="v7-health-", dir=str(block.health_output.parent)
     ) as temporary:
         temporary_root = Path(temporary)
         for config in diagnostic_configs:
@@ -1033,6 +1092,9 @@ def run_gate(
                 fixed=fixed,
                 schedule=schedule,
                 resume=resume,
+                expected_adaptive_update_by_condition=(
+                    expected_adaptive_update_by_condition
+                ),
             )
             gc.collect()
             torch.cuda.empty_cache()
@@ -1050,7 +1112,7 @@ def run_gate(
         "artifact_class": HEALTH_ARTIFACT_CLASS,
         "reporting_eligibility": REPORTING_ELIGIBILITY,
         "confirmatory_analysis_eligibility": False,
-        "purpose": "pre-v6-pilot six-condition implementation health validation",
+        "purpose": "pre-v7-pilot six-condition implementation health validation",
         "status": status,
         "pass": status == "PASS",
         "dataset": block.dataset,
@@ -1063,24 +1125,14 @@ def run_gate(
         "git_commit": git_identity["git_commit"],
         "tracked_clean": git_identity["tracked_clean"],
         "attempt_receipt": artifact_path_reference(block.attempt_receipt, REPOSITORY_ROOT),
-        "attempt_receipt_sha256": sha256_file(block.attempt_receipt),
+        "attempt_receipt_sha256": attempt_receipt_sha256,
         "started_at": started_at,
         "finished_at": utc_now(),
         "duration_seconds": time.perf_counter() - started_clock,
         "health_seed_disposition": HEALTH_SEED_DISPOSITION,
         "pilot_seed_disposition": PILOT_SEED_DISPOSITION,
         "source": {
-            "protocol": artifact_path_reference(protocol_path, REPOSITORY_ROOT),
-            "protocol_file_sha256": sha256_file(protocol_path),
-            "configs": [
-                {
-                    "condition": config.model.condition,
-                    "path": artifact_path_reference(path, REPOSITORY_ROOT),
-                    "file_sha256": sha256_file(path),
-                    "config_hash": config.config_hash,
-                }
-                for path, config in zip(config_paths, configs)
-            ],
+            **dict(source_binding),
             "reference_config_hash": configs[0].config_hash,
             "reference_config_seed": configs[0].runtime.seed,
             "health_seed": block.health_seed,
@@ -1089,7 +1141,7 @@ def run_gate(
             "fixed_batch_sha256": fixed_batch_sha256,
             "fixed_batch_shape": list(inputs.shape),
             "fixed_batch_size": required_batch,
-            "runtime_sources_sha256": dict(runtime_sources),
+            "cifar100_provenance": dict(cifar100_provenance),
             **source_identity,
         },
         "environment": {
@@ -1111,6 +1163,9 @@ def run_gate(
         },
         "checks": {
             "contract": dict(health_contract),
+            "expected_adaptive_update_by_condition": (
+                expected_adaptive_update_by_condition
+            ),
             "performance_thresholds_evaluated": [],
             "initial_forward_equivalent": initial["initial_forward_equivalent"],
             "shared_initialization_equal": initial["shared_initialization_equal"],
@@ -1127,6 +1182,9 @@ def _fatal_report(
     block: PilotBlock,
     git_identity: Mapping[str, Any],
     runtime_sources: Mapping[str, str],
+    source_binding: Mapping[str, Any],
+    attempt_receipt_sha256: str,
+    preclaim: Mapping[str, Any],
     exc: BaseException,
 ) -> dict[str, Any]:
     message = f"{type(exc).__name__}: {exc}"
@@ -1135,7 +1193,7 @@ def _fatal_report(
         "artifact_class": HEALTH_ARTIFACT_CLASS,
         "reporting_eligibility": REPORTING_ELIGIBILITY,
         "confirmatory_analysis_eligibility": False,
-        "purpose": "pre-v6-pilot six-condition implementation health validation",
+        "purpose": "pre-v7-pilot six-condition implementation health validation",
         "status": "ERROR",
         "pass": False,
         "dataset": block.dataset,
@@ -1148,11 +1206,12 @@ def _fatal_report(
         "git_commit": git_identity.get("git_commit"),
         "tracked_clean": git_identity.get("tracked_clean"),
         "attempt_receipt": artifact_path_reference(block.attempt_receipt, REPOSITORY_ROOT),
-        "attempt_receipt_sha256": sha256_file(block.attempt_receipt),
+        "attempt_receipt_sha256": attempt_receipt_sha256,
         "finished_at": utc_now(),
         "fatal_error": message,
         "traceback": traceback.format_exc(),
-        "source": {"runtime_sources_sha256": dict(runtime_sources)},
+        "source": dict(source_binding),
+        "preclaim": _strict_json_safe(preclaim),
         "integrity_anomalies": ["fatal execution error"],
         "failures": [message],
         "health_seed_disposition": HEALTH_SEED_DISPOSITION,
@@ -1168,21 +1227,21 @@ def validate_current_runtime_against_health_report(
     block: PilotBlock,
     device: str,
 ) -> dict[str, Any]:
-    """Rebuild V6 health context while authorizing only the pilot seed."""
+    """Rebuild V7 health context while authorizing only the pilot seed."""
 
     if report.get("status") != "PASS" or report.get("pass") is not True:
-        raise PilotV6Error("Only a canonical V6 health PASS can authorize the pilot")
+        raise PilotV7Error("Only a canonical V7 health PASS can authorize the pilot")
     if reference_config.data.dataset != block.dataset:
-        raise PilotV6Error("V6 pilot reference config dataset differs from the health block")
+        raise PilotV7Error("V7 pilot reference config dataset differs from the health block")
     if reference_config.runtime.seed != block.pilot_seed:
-        raise PilotV6Error("V6 pilot launch config must retain the pilot seed")
+        raise PilotV7Error("V7 pilot launch config must retain the pilot seed")
     if not device or device == "auto":
-        raise PilotV6Error("V6 pilot launch requires an explicit CUDA device")
+        raise PilotV7Error("V7 pilot launch requires an explicit CUDA device")
     identity = repository_git_identity(REPOSITORY_ROOT)
     if identity.get("tracked_clean") is not True or identity.get("git_commit") != report.get(
         "git_commit"
     ):
-        raise PilotV6Error("Current Git identity differs from the V6 health report")
+        raise PilotV7Error("Current Git identity differs from the V7 health report")
     environment_contract = protocol["pilot_acceptance"]["environment"]
     fixed_contract = protocol["pilot_acceptance"]["health"]
     selected_device = torch.device(device)
@@ -1191,9 +1250,9 @@ def validate_current_runtime_against_health_report(
         selected_device, str(environment_contract["expected_gpu_substring"])
     )
     legacy_gate.validate_runtime_environment(environment_contract, hardware)
-    validate_v6_runtime_environment(environment_contract)
+    validate_v7_runtime_environment(environment_contract)
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != environment_contract["cublas_workspace_config"]:
-        raise PilotV6Error("Current CUBLAS workspace setting differs from V6 health")
+        raise PilotV7Error("Current CUBLAS workspace setting differs from V7 health")
     environment_text, environment_hash = _training_environment_identity(
         selected_device, amp=False, deterministic=True
     )
@@ -1202,24 +1261,33 @@ def validate_current_runtime_against_health_report(
         not isinstance(report_environment, Mapping)
         or report_environment.get("training_environment_sha256") != environment_hash
     ):
-        raise PilotV6Error("Current training environment differs from the V6 health report")
+        raise PilotV7Error("Current training environment differs from the V7 health report")
     if report_environment.get("training_environment_identity") != json.loads(environment_text):
-        raise PilotV6Error("Current training environment identity payload changed")
+        raise PilotV7Error("Current training environment identity payload changed")
     idle = legacy_gate.gpu_idle_precheck(selected_device)
     prior_idle = report_environment.get("gpu_idle_precheck")
     if not isinstance(prior_idle, Mapping) or prior_idle.get("device_uuid") != idle.get(
         "device_uuid"
     ):
-        raise PilotV6Error("Current CUDA device UUID differs from the V6 health report")
+        raise PilotV7Error("Current CUDA device UUID differs from the V7 health report")
     required = int(fixed_contract["fixed_batch_size"])
     _resolved, inputs, targets, manifest, source_identity = _load_fixed_health_batch(
         reference_config, seed=block.health_seed, required_batch_size=required
     )
     inputs = inputs[:required]
     targets = targets[:required]
+    try:
+        cifar100_provenance = validate_v7_cifar100_provenance_files(
+            protocol,
+            project_root=REPOSITORY_ROOT,
+        )
+    except ValueError as exc:
+        raise PilotV7Error(
+            f"Current V7 CIFAR-100 provenance differs from health: {exc}"
+        ) from exc
     source = report.get("source")
     if not isinstance(source, Mapping):
-        raise PilotV6Error("V6 health report source evidence is missing")
+        raise PilotV7Error("V7 health report source evidence is missing")
     observed = {
         "split_manifest_sha256": manifest["manifest_sha256"],
         "fixed_batch_sha256": legacy_gate.tensor_batch_sha256(inputs, targets),
@@ -1230,17 +1298,24 @@ def validate_current_runtime_against_health_report(
         **source_identity,
     }
     mismatches = [key for key, value in observed.items() if source.get(key) != value]
+    if source.get("cifar100_provenance") != cifar100_provenance:
+        mismatches.append("cifar100_provenance")
+    preclaim = report.get("preclaim")
+    if not isinstance(preclaim, Mapping) or preclaim.get(
+        "cifar100_provenance"
+    ) != cifar100_provenance:
+        mismatches.append("preclaim.cifar100_provenance")
     runtime_hashes = source.get("runtime_sources_sha256")
     if not isinstance(runtime_hashes, Mapping) or _runtime_source_hashes() != dict(runtime_hashes):
         mismatches.append("runtime_sources_sha256")
     if mismatches:
-        raise PilotV6Error(
-            "Current V6 dataset/runtime identity differs from health at: "
+        raise PilotV7Error(
+            "Current V7 dataset/runtime identity differs from health at: "
             + ", ".join(dict.fromkeys(mismatches))
         )
     return {
         "pass": True,
-        "protocol_version": 6,
+        "protocol_version": 7,
         "dataset": block.dataset,
         "health_seed": block.health_seed,
         "pilot_seed": block.pilot_seed,
@@ -1249,6 +1324,7 @@ def validate_current_runtime_against_health_report(
         "device_uuid": idle["device_uuid"],
         "hardware": hardware,
         "training_environment_sha256": environment_hash,
+        "cifar100_provenance": cifar100_provenance,
         **observed,
     }
 
@@ -1258,10 +1334,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         protocol_path = args.protocol.resolve()
         protocol = load_protocol(protocol_path)
-        if protocol.get("protocol_version") != 6:
-            raise PilotV6Error("This health gate accepts only protocol_version 6")
+        if protocol.get("protocol_version") != 7:
+            raise PilotV7Error("This health gate accepts only protocol_version 7")
         block = resolve_pilot_block(protocol, repository_root=REPOSITORY_ROOT)
-        author = require_v6_author_freeze(protocol, repository_root=REPOSITORY_ROOT)
+        author = require_v7_author_freeze(protocol, repository_root=REPOSITORY_ROOT)
         config_dir = (
             args.config_dir.resolve()
             if args.config_dir is not None
@@ -1271,12 +1347,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifact_paths_for_protocol(protocol)["pilot_matrix"]
         )
         if config_dir != expected_config_dir:
-            raise PilotV6Error("V6 health config directory differs from artifact binding")
+            raise PilotV7Error("V7 health config directory differs from artifact binding")
         config_paths, configs = _load_exact_configs(protocol, protocol_path, config_dir)
         if block.health_output.exists():
-            raise PilotV6Error("Canonical V6 health output exists; no retry is allowed")
+            raise PilotV7Error("Canonical V7 health output exists; no retry is allowed")
         if block.attempt_receipt.exists():
-            raise PilotV6Error("The V6 health seed is already consumed; no retry is allowed")
+            raise PilotV7Error("The V7 health seed is already consumed; no retry is allowed")
         for label, path in (
             ("pilot plan", block.pilot_plan),
             ("pilot output root", block.pilot_output_root),
@@ -1286,10 +1362,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         ):
             if path.exists():
-                raise PilotV6Error(f"{label} exists before the one-shot health gate: {path}")
+                raise PilotV7Error(f"{label} exists before the one-shot health gate: {path}")
         git_identity = repository_git_identity(REPOSITORY_ROOT)
         if git_identity.get("tracked_clean") is not True:
-            raise PilotV6Error("V6 health evidence requires a clean tracked worktree")
+            raise PilotV7Error("V7 health evidence requires a clean tracked worktree")
         bound_paths = (
             *RUNTIME_SOURCE_PATHS,
             protocol_path,
@@ -1298,6 +1374,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _require_head_bound_sources(bound_paths)
         runtime_sources = _runtime_source_hashes()
+        source_binding = health_source_binding(
+            block=block,
+            protocol_path=protocol_path,
+            config_paths=config_paths,
+            configs=configs,
+            repository_root=REPOSITORY_ROOT,
+            runtime_sources=runtime_sources,
+        )
         preclaim = _preclaim_gate(
             protocol=protocol,
             configs=configs,
@@ -1305,18 +1389,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             device_name=args.device,
             git_identity=git_identity,
             runtime_sources=runtime_sources,
+            source_binding=source_binding,
         )
         print(
-            "V6_HEALTH_PRECLAIM_PASS "
+            "V7_HEALTH_PRECLAIM_PASS "
             f"dataset={block.dataset} device={preclaim['device']} "
             f"fixed_batch_sha256={preclaim['fixed_batch_sha256']}"
         )
         if args.precheck_only:
             if block.attempt_receipt.exists() or block.health_output.exists():
-                raise PilotV6Error(
-                    "V6 precheck-only must not create or observe health-seed artifacts"
+                raise PilotV7Error(
+                    "V7 precheck-only must not create or observe health-seed artifacts"
                 )
-            print("V6_HEALTH_PRECHECK_ONLY_PASS")
+            print("V7_HEALTH_PRECHECK_ONLY_PASS")
             print("NO_HEALTH_SEED_WAS_CLAIMED")
             return 0
         receipt = attempt_receipt_payload(
@@ -1328,19 +1413,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository_root=REPOSITORY_ROOT,
             runtime_sources=runtime_sources,
         )
+        attempt_receipt_sha256 = json_file_payload_sha256(receipt)
+    except Exception as exc:  # noqa: BLE001 - normalize all pre-claim failures.
+        print(f"V7_HEALTH_GATE_BLOCKED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    try:
         exclusive_create_json(block.attempt_receipt, receipt)
-        print(f"V6_AUTHOR_FREEZE_PASS signoff_sha256={author['signoff_sha256']}")
+    except Exception as exc:  # noqa: BLE001 - no receipt means no claimed seed.
+        print(f"V7_HEALTH_GATE_BLOCKED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        print(f"V7_AUTHOR_FREEZE_PASS signoff_sha256={author['signoff_sha256']}")
         print(
-            "V6_HEALTH_ATTEMPT_CLAIMED "
+            "V7_HEALTH_ATTEMPT_CLAIMED "
             f"dataset={block.dataset} health_seed={block.health_seed} "
             f"pilot_seed={block.pilot_seed}"
         )
         print("HEALTH_SEED_EXECUTION_BEGINS")
-    except Exception as exc:  # noqa: BLE001 - normalize all pre-claim failures.
-        print(f"V6_HEALTH_GATE_BLOCKED: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
-
-    try:
         report = run_gate(
             protocol=protocol,
             protocol_path=protocol_path,
@@ -1350,6 +1441,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             device_name=args.device,
             git_identity=git_identity,
             runtime_sources=runtime_sources,
+            source_binding=source_binding,
+            attempt_receipt_sha256=attempt_receipt_sha256,
             expected_fixed_batch_sha256=str(preclaim["fixed_batch_sha256"]),
         )
     except BaseException as exc:  # noqa: BLE001 - preserve consumed-seed evidence.
@@ -1357,18 +1450,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             block=block,
             git_identity=git_identity,
             runtime_sources=runtime_sources,
+            source_binding=source_binding,
+            attempt_receipt_sha256=attempt_receipt_sha256,
+            preclaim=preclaim,
             exc=exc,
         )
     report["preclaim"] = _strict_json_safe(preclaim)
     if block.health_output.exists():
-        print("V6_HEALTH_GATE_BLOCKED: output appeared during execution", file=sys.stderr)
+        print("V7_HEALTH_GATE_BLOCKED: output appeared during execution", file=sys.stderr)
         return 2
     try:
         exclusive_create_json(block.health_output, _strict_json_safe(report))
     except FileExistsError:
-        print("V6_HEALTH_GATE_BLOCKED: output appeared during execution", file=sys.stderr)
+        print("V7_HEALTH_GATE_BLOCKED: output appeared during execution", file=sys.stderr)
         return 2
-    print(f"V6_HEALTH_GATE_{report['status']} dataset={block.dataset}")
+    print(f"V7_HEALTH_GATE_{report['status']} dataset={block.dataset}")
     print(f"NON_REPORTING_OUTPUT={block.health_output}")
     print(f"HEALTH_SEED_{block.health_seed}_CONSUMED_DO_NOT_RETRY")
     print(f"PILOT_SEED_{block.pilot_seed}_REMAINS_UNCONSUMED")

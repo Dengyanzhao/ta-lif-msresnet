@@ -119,6 +119,68 @@ V6_REQUIRED_SOURCE_PATHS = (
     "scripts/validate_v3_pilot.py",
     "scripts/validate_v6_pilot.py",
 )
+V7_REQUIRED_SOURCE_PATHS = (
+    "V7_MECHANISM_5090_RUNBOOK.md",
+    "V7_STATISTICAL_ANALYSIS_AUDIT.md",
+    "src/talif_msresnet/benchmark.py",
+    "src/talif_msresnet/benchmark_v7.py",
+    "src/talif_msresnet/config.py",
+    "src/talif_msresnet/config_v6.py",
+    "src/talif_msresnet/config_v7.py",
+    "src/talif_msresnet/data.py",
+    "src/talif_msresnet/diagnostics.py",
+    "src/talif_msresnet/freeze.py",
+    "src/talif_msresnet/models.py",
+    "src/talif_msresnet/neurons.py",
+    "src/talif_msresnet/ops.py",
+    "src/talif_msresnet/pathing.py",
+    "src/talif_msresnet/pilot_v3.py",
+    "src/talif_msresnet/pilot_v4.py",
+    "src/talif_msresnet/pilot_v5.py",
+    "src/talif_msresnet/pilot_v6.py",
+    "src/talif_msresnet/pilot_v7.py",
+    "src/talif_msresnet/preflight.py",
+    "src/talif_msresnet/train.py",
+    "src/talif_msresnet/utils.py",
+    "src/talif_msresnet/v7_statistics.py",
+    "scripts/analyze_v7_results.py",
+    "scripts/archive_v7_evidence.py",
+    "scripts/create_freeze_manifest.py",
+    "scripts/create_v7_instance_package.py",
+    "scripts/evaluate_checkpoints.py",
+    "scripts/export_v7_validation_batch.py",
+    "scripts/generate_run_configs.py",
+    "scripts/pilot_health_gate.py",
+    "scripts/pilot_health_gate_v3.py",
+    "scripts/pilot_health_gate_v4.py",
+    "scripts/pilot_health_gate_v5.py",
+    "scripts/pilot_health_gate_v6.py",
+    "scripts/pilot_health_gate_v7.py",
+    "scripts/preflight.py",
+    "scripts/run_matrix.py",
+    "scripts/run_v7_benchmarks.py",
+    "scripts/validate_v3_pilot.py",
+    "scripts/validate_v4_pilot.py",
+    "scripts/validate_v5_pilot.py",
+    "scripts/validate_v6_pilot.py",
+    "scripts/validate_v7_pilot.py",
+    "scripts/validate_v7_source_release.py",
+    "scripts/v7_monitor_cn.py",
+    "tests/test_v7_archive.py",
+    "tests/test_v7_benchmark.py",
+    "tests/test_v7_final_test_binding.py",
+    "tests/test_v7_freeze_gates.py",
+    "tests/test_v7_health_gate.py",
+    "tests/test_v7_monitor_cn.py",
+    "tests/test_v7_orchestration.py",
+    "tests/test_v7_protocol.py",
+    "tests/test_v7_provenance.py",
+    "tests/test_v7_runtime.py",
+    "tests/test_v7_source_release.py",
+    "tests/test_v7_statistics.py",
+    "tests/test_v7_training_orchestration.py",
+    "tests/test_validate_v7_pilot.py",
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REMOTE_RE = re.compile(r"^(?:https?://|ssh://|git://|git@[^:]+:).+", re.IGNORECASE)
@@ -468,7 +530,7 @@ def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
         raise FreezeManifestError("protocol_status.confirmed_by must identify the human reviewers")
     version = int(protocol.get("protocol_version", 1))
     responsible_author: str | None = None
-    if version in (4, 5, 6):
+    if version in (4, 5, 6, 7):
         responsible_author = _accountable_responsible_author(
             confirmed_by, version=version
         )
@@ -492,7 +554,7 @@ def _validate_protocol_status(protocol: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validate_signoff(text: str, protocol: Mapping[str, Any]) -> None:
     version = int(protocol.get("protocol_version", 1))
-    expected_status = V4_SIGNED_STATUS if version in (4, 5, 6) else SIGNED_STATUS
+    expected_status = V4_SIGNED_STATUS if version in (4, 5, 6, 7) else SIGNED_STATUS
     status_lines = re.findall(r"^Status:.*$", text, flags=re.MULTILINE)
     if status_lines != [expected_status]:
         raise FreezeManifestError(
@@ -505,7 +567,7 @@ def _validate_signoff(text: str, protocol: Mapping[str, Any]) -> None:
         pattern = rf"^- \[[xX]\] `{re.escape(field)}`:"
         if re.search(pattern, text, flags=re.MULTILINE) is None:
             raise FreezeManifestError(f"Author checklist item is not checked: {field}")
-    if version in (4, 5, 6):
+    if version in (4, 5, 6, 7):
         status = protocol.get("protocol_status", {})
         confirmed_by = status.get("confirmed_by") if isinstance(status, Mapping) else None
         responsible = _accountable_responsible_author(
@@ -1252,6 +1314,223 @@ def _validate_v6_pilot_acceptance(
     }
 
 
+def _validate_v7_pilot_acceptance(
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    project_root: Path,
+) -> dict[str, Any]:
+    """Re-run and bind the exact V7 six-condition CIFAR-100 pilot PASS."""
+
+    acceptance = protocol.get("pilot_acceptance")
+    if not isinstance(acceptance, Mapping):
+        raise FreezeManifestError("Protocol v7 has no pilot_acceptance mapping")
+    pilot_contract = acceptance.get("pilot")
+    if not isinstance(pilot_contract, Mapping):
+        raise FreezeManifestError("Protocol v7 has no pilot acceptance contract")
+    validation_value = acceptance.get("validation_output")
+    if not isinstance(validation_value, str) or not validation_value.strip():
+        raise FreezeManifestError("Protocol v7 has no pilot validation output path")
+    validation_path = _inside(
+        project_root,
+        validation_value,
+        "V7 pilot validation",
+        kind="file",
+    )
+    stored = dict(_read_json(validation_path, "v7 pilot validation"))
+
+    validator_path = project_root / "scripts" / "validate_v7_pilot.py"
+    if not validator_path.is_file():
+        raise FreezeManifestError(f"V7 pilot validator is missing: {validator_path}")
+    spec = importlib.util.spec_from_file_location(
+        "talif_freeze_v7_pilot_validator", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise FreezeManifestError("Cannot load the v7 pilot validator")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise FreezeManifestError(
+            f"Cannot import the v7 pilot validator: {type(exc).__name__}: {exc}"
+        ) from exc
+    validate_pilot = getattr(module, "validate_pilot", None)
+    if not callable(validate_pilot):
+        raise FreezeManifestError("V7 pilot validator has no validate_pilot entry point")
+
+    conditions = tuple(active_conditions_for_protocol(protocol))
+    dataset_name = acceptance.get("dataset")
+    health_seed = acceptance.get("health_seed")
+    pilot_seed = acceptance.get("pilot_seed")
+    run_handling = acceptance.get("run_handling")
+    artifacts = artifact_paths_for_protocol(protocol)
+    expected_top = {
+        "schema_version": 1,
+        "protocol_version": 7,
+        "artifact_class": "NON_REPORTABLE_V7_MECHANISM_PILOT_ACCEPTANCE",
+        "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
+        "confirmatory_analysis_eligibility": False,
+        "status": "PASS",
+        "pass": True,
+        "decision": "ACCEPT_V7_SIX_CONDITION_120_EPOCH_PILOT_RELEASE_FORMAL_FREEZE",
+        "exit_code": 0,
+        "protocol_path": protocol_path.relative_to(project_root).as_posix(),
+        "protocol_file_sha256": _sha256_file(protocol_path),
+        "protocol_hash": _stable_hash(protocol),
+        "acceptance_hash": _stable_hash(dict(acceptance)),
+        "required_epochs": pilot_contract.get("epochs"),
+        "config_dir": artifacts.get("pilot_matrix"),
+        "failure_action": (
+            run_handling.get("failure_action")
+            if isinstance(run_handling, Mapping)
+            else None
+        ),
+    }
+    mismatches = [
+        key for key, expected in expected_top.items() if stored.get(key) != expected
+    ]
+    if dataset_name != "cifar100":
+        mismatches.append("pilot_acceptance.dataset")
+    if tuple(acceptance.get("conditions", ())) != conditions or conditions != (
+        "M0",
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "PLIF",
+    ):
+        mismatches.append("pilot_acceptance.conditions")
+    if not isinstance(health_seed, int) or not isinstance(pilot_seed, int):
+        mismatches.append("pilot seed bindings")
+    for key in ("matrix_manifest_sha256", "run_manifest_csv_sha256"):
+        if SHA256_RE.fullmatch(str(stored.get(key, ""))) is None:
+            mismatches.append(key)
+
+    datasets = stored.get("datasets")
+    evidence: Mapping[str, Any] | None = None
+    if not isinstance(datasets, Mapping) or set(datasets) != {"cifar100"}:
+        mismatches.append("datasets")
+    else:
+        candidate = datasets.get("cifar100")
+        if isinstance(candidate, Mapping):
+            evidence = candidate
+        else:
+            mismatches.append("cifar100 dataset evidence")
+    environment_sha256 = stored.get("training_environment_sha256")
+    if SHA256_RE.fullmatch(str(environment_sha256 or "")) is None:
+        mismatches.append("training_environment_sha256")
+
+    if evidence is not None:
+        expected_dataset = {
+            "status": "PASS",
+            "pass": True,
+            "seed": pilot_seed,
+            "health_seed": health_seed,
+            "pilot_seed": pilot_seed,
+            "results_root": acceptance.get("pilot_output_root"),
+            "health_report_path": acceptance.get("health_output"),
+            "attempt_receipt_path": acceptance.get("attempt_receipt"),
+            "pilot_plan_path": acceptance.get("pilot_plan"),
+            "environment_sha256": environment_sha256,
+        }
+        mismatches.extend(
+            f"cifar100.{key}"
+            for key, expected in expected_dataset.items()
+            if evidence.get(key) != expected
+        )
+        for key in (
+            "block_hash",
+            "health_report_sha256",
+            "attempt_receipt_sha256",
+            "pilot_plan_sha256",
+            "shared_weight_sha256",
+            "split_manifest_sha256",
+        ):
+            if SHA256_RE.fullmatch(str(evidence.get(key, ""))) is None:
+                mismatches.append(f"cifar100.{key}")
+        runs = evidence.get("runs")
+        if not isinstance(runs, Mapping) or tuple(runs) != conditions:
+            mismatches.append("cifar100.runs")
+        else:
+            for condition in conditions:
+                run = runs.get(condition)
+                expected_run_id = (
+                    f"E9_cifar100_d20_t6_{condition}_s{pilot_seed}"
+                )
+                if (
+                    not isinstance(run, Mapping)
+                    or run.get("run_id") != expected_run_id
+                    or run.get("condition") != condition
+                    or run.get("training_environment_sha256") != environment_sha256
+                    or run.get("integrity_failures") != []
+                    or run.get("threshold_failures") != []
+                ):
+                    mismatches.append(f"cifar100.runs.{condition}")
+    if stored.get("integrity_failures") != [] or stored.get("threshold_failures") != []:
+        mismatches.append("failure records")
+    if mismatches:
+        raise FreezeManifestError(
+            "V7 pilot validation is not an exact six-condition PASS: "
+            + ", ".join(dict.fromkeys(mismatches))
+        )
+
+    try:
+        current = validate_pilot(
+            protocol_path=protocol_path,
+            config_dir=project_root / artifacts["pilot_matrix"],
+            repository_root=project_root,
+        )
+    except Exception as exc:
+        raise FreezeManifestError(
+            f"Current v7 pilot artifacts fail revalidation: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(current, Mapping):
+        raise FreezeManifestError("V7 pilot validator returned a non-mapping result")
+    stored_comparable = dict(stored)
+    current_comparable = dict(current)
+    stored_comparable.pop("validated_at", None)
+    current_comparable.pop("validated_at", None)
+    if stored_comparable != current_comparable:
+        raise FreezeManifestError(
+            "Stored v7 pilot validation differs from the current pilot artifacts"
+        )
+
+    assert evidence is not None
+    return {
+        "artifact_class": stored["artifact_class"],
+        "status": "PASS",
+        "pass": True,
+        "path": validation_path.relative_to(project_root).as_posix(),
+        "sha256": _sha256_file(validation_path),
+        "protocol_file_sha256": stored["protocol_file_sha256"],
+        "protocol_hash": stored["protocol_hash"],
+        "acceptance_hash": stored["acceptance_hash"],
+        "validated_at": stored.get("validated_at"),
+        "training_environment_sha256": environment_sha256,
+        "conditions": list(conditions),
+        "pilot_matrix_manifest_sha256": stored["matrix_manifest_sha256"],
+        "pilot_run_manifest_csv_sha256": stored["run_manifest_csv_sha256"],
+        "validator": {
+            "path": validator_path.relative_to(project_root).as_posix(),
+            "sha256": _sha256_file(validator_path),
+        },
+        "datasets": {
+            "cifar100": {
+                "status": evidence["status"],
+                "pass": evidence["pass"],
+                "health_seed": evidence["health_seed"],
+                "pilot_seed": evidence["pilot_seed"],
+                "block_hash": evidence["block_hash"],
+                "environment_sha256": evidence["environment_sha256"],
+                "shared_weight_sha256": evidence["shared_weight_sha256"],
+                "split_manifest_sha256": evidence["split_manifest_sha256"],
+                "health_report_sha256": evidence["health_report_sha256"],
+                "attempt_receipt_sha256": evidence["attempt_receipt_sha256"],
+                "pilot_plan_sha256": evidence["pilot_plan_sha256"],
+            }
+        },
+    }
+
+
 def _manifest_row(resolved: Any, config_path: Path) -> dict[str, Any]:
     return {
         "run_id": resolved.runtime.run_id,
@@ -1360,6 +1639,14 @@ def _validate_matrix(
         },
         "config_count": len(config_bindings),
         "config_set_sha256": _stable_hash(config_bindings),
+        **(
+            {
+                "conditions": list(active_conditions_for_protocol(protocol)),
+                "seeds": list(protocol["seeds"]),
+            }
+            if int(protocol.get("protocol_version", 1)) == 7
+            else {}
+        ),
     }
 
 
@@ -1407,7 +1694,8 @@ def build_manifest(
     is_v4 = version == 4
     is_v5 = version == 5
     is_v6 = version == 6
-    is_isolated_protocol = version in (3, 4, 5, 6)
+    is_v7 = version == 7
+    is_isolated_protocol = version in (3, 4, 5, 6, 7)
     allow_legacy_artifacts = version in (3, 4, 5)
     artifacts = artifact_paths_for_protocol(protocol)
     if is_isolated_protocol:
@@ -1453,6 +1741,10 @@ def build_manifest(
         pilot_validation = _validate_v6_pilot_acceptance(
             protocol, protocol_path, project_root
         )
+    elif is_v7:
+        pilot_validation = _validate_v7_pilot_acceptance(
+            protocol, protocol_path, project_root
+        )
     else:
         pilot_validation = None
 
@@ -1480,6 +1772,8 @@ def build_manifest(
         required_sources = (*REQUIRED_SOURCE_PATHS, *V5_REQUIRED_SOURCE_PATHS)
     elif is_v6:
         required_sources = (*REQUIRED_SOURCE_PATHS, *V6_REQUIRED_SOURCE_PATHS)
+    elif is_v7:
+        required_sources = (*REQUIRED_SOURCE_PATHS, *V7_REQUIRED_SOURCE_PATHS)
     else:
         required_sources = REQUIRED_SOURCE_PATHS
     committed_gate_sources: dict[str, bytes] = {}
@@ -1494,6 +1788,8 @@ def build_manifest(
             is_v5 and relative in V5_REQUIRED_SOURCE_PATHS
         ) or (
             is_v6 and relative in V6_REQUIRED_SOURCE_PATHS
+        ) or (
+            is_v7 and relative in V7_REQUIRED_SOURCE_PATHS
         ):
             committed_gate_sources[relative] = committed_source
     if require_creation_state:
@@ -1516,6 +1812,16 @@ def build_manifest(
     assert isinstance(tree, str) and isinstance(commit_time, str)
 
     matrix = _validate_matrix(protocol, protocol_path, matrix_dir, project_root)
+    if is_v7 and (
+        matrix.get("run_count") != 48
+        or matrix.get("config_count") != 48
+        or matrix.get("conditions") != ["M0", "M1", "M2", "M3", "M4", "PLIF"]
+        or matrix.get("seeds") != list(protocol["seeds"])
+        or len(protocol["seeds"]) != 8
+    ):
+        raise FreezeManifestError(
+            "Protocol v7 formal matrix must bind exactly 8 seeds x 6 ordered conditions"
+        )
     project_in_repo = project_root.relative_to(repo_root)
 
     def project_relative(path: Path) -> str:
@@ -1546,13 +1852,15 @@ def build_manifest(
     }
     if pilot_validation is not None:
         manifest["pilot_validation"] = pilot_validation
-    if is_v4 or is_v5 or is_v6:
+    if is_v4 or is_v5 or is_v6 or is_v7:
         gate_source_paths = (
             V4_REQUIRED_SOURCE_PATHS
             if is_v4
             else V5_REQUIRED_SOURCE_PATHS
             if is_v5
             else V6_REQUIRED_SOURCE_PATHS
+            if is_v6
+            else V7_REQUIRED_SOURCE_PATHS
         )
         manifest["gate_sources"] = {
             relative: {
@@ -1665,7 +1973,7 @@ def verify_manifest(*, project_root: Path, manifest_path: Path) -> dict[str, Any
     )
     bound_protocol = load_protocol(bound_protocol_path)
     bound_version = int(bound_protocol.get("protocol_version", 1))
-    is_isolated_protocol = bound_version in (3, 4, 5, 6)
+    is_isolated_protocol = bound_version in (3, 4, 5, 6, 7)
     allow_legacy_artifacts = bound_version in (3, 4, 5)
     additional_artifact_dirs = (
         (

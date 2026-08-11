@@ -69,6 +69,70 @@ V6_GATE_SOURCE_PATHS = frozenset(
         "scripts/validate_v6_pilot.py",
     }
 )
+V7_GATE_SOURCE_PATHS = frozenset(
+    {
+        "V7_MECHANISM_5090_RUNBOOK.md",
+        "V7_STATISTICAL_ANALYSIS_AUDIT.md",
+        "src/talif_msresnet/benchmark.py",
+        "src/talif_msresnet/benchmark_v7.py",
+        "src/talif_msresnet/config.py",
+        "src/talif_msresnet/config_v6.py",
+        "src/talif_msresnet/config_v7.py",
+        "src/talif_msresnet/data.py",
+        "src/talif_msresnet/diagnostics.py",
+        "src/talif_msresnet/freeze.py",
+        "src/talif_msresnet/models.py",
+        "src/talif_msresnet/neurons.py",
+        "src/talif_msresnet/ops.py",
+        "src/talif_msresnet/pathing.py",
+        "src/talif_msresnet/pilot_v3.py",
+        "src/talif_msresnet/pilot_v4.py",
+        "src/talif_msresnet/pilot_v5.py",
+        "src/talif_msresnet/pilot_v6.py",
+        "src/talif_msresnet/pilot_v7.py",
+        "src/talif_msresnet/preflight.py",
+        "src/talif_msresnet/train.py",
+        "src/talif_msresnet/utils.py",
+        "src/talif_msresnet/v7_statistics.py",
+        "scripts/analyze_v7_results.py",
+        "scripts/archive_v7_evidence.py",
+        "scripts/create_freeze_manifest.py",
+        "scripts/create_v7_instance_package.py",
+        "scripts/evaluate_checkpoints.py",
+        "scripts/export_v7_validation_batch.py",
+        "scripts/generate_run_configs.py",
+        "scripts/pilot_health_gate.py",
+        "scripts/pilot_health_gate_v3.py",
+        "scripts/pilot_health_gate_v4.py",
+        "scripts/pilot_health_gate_v5.py",
+        "scripts/pilot_health_gate_v6.py",
+        "scripts/pilot_health_gate_v7.py",
+        "scripts/preflight.py",
+        "scripts/run_matrix.py",
+        "scripts/run_v7_benchmarks.py",
+        "scripts/validate_v3_pilot.py",
+        "scripts/validate_v4_pilot.py",
+        "scripts/validate_v5_pilot.py",
+        "scripts/validate_v6_pilot.py",
+        "scripts/validate_v7_pilot.py",
+        "scripts/validate_v7_source_release.py",
+        "scripts/v7_monitor_cn.py",
+        "tests/test_v7_archive.py",
+        "tests/test_v7_benchmark.py",
+        "tests/test_v7_final_test_binding.py",
+        "tests/test_v7_freeze_gates.py",
+        "tests/test_v7_health_gate.py",
+        "tests/test_v7_monitor_cn.py",
+        "tests/test_v7_orchestration.py",
+        "tests/test_v7_protocol.py",
+        "tests/test_v7_provenance.py",
+        "tests/test_v7_runtime.py",
+        "tests/test_v7_source_release.py",
+        "tests/test_v7_statistics.py",
+        "tests/test_v7_training_orchestration.py",
+        "tests/test_validate_v7_pilot.py",
+    }
+)
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
@@ -163,7 +227,7 @@ def verify_formal_freeze(
                 f"{requested_matrix} != {bound_matrix}"
             )
     version = int(protocol_mapping.get("protocol_version", 1))
-    if version in (4, 5, 6):
+    if version in (4, 5, 6, 7):
         pilot_record = stored.get("pilot_validation")
         gate_sources = stored.get("gate_sources")
         required_sources = (
@@ -172,6 +236,8 @@ def verify_formal_freeze(
             else V5_GATE_SOURCE_PATHS
             if version == 5
             else V6_GATE_SOURCE_PATHS
+            if version == 6
+            else V7_GATE_SOURCE_PATHS
         )
         validator_path = f"scripts/validate_v{version}_pilot.py"
         if not isinstance(pilot_record, Mapping):
@@ -290,10 +356,115 @@ def verify_formal_freeze(
                     "Protocol v6 freeze manifest has an inconsistent six-condition "
                     "pilot/environment binding"
                 )
+        elif version == 7:
+            expected_artifact_class = "NON_REPORTABLE_V7_MECHANISM_PILOT_ACCEPTANCE"
+            if pilot_record.get("artifact_class") != expected_artifact_class:
+                raise FreezeGateError(
+                    "Protocol v7 formal release is not bound to the V7 six-condition pilot artifact"
+                )
+            if protocol_record.get("version") != 7:
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest protocol identity is not version 7"
+                )
+            protocol_file_sha256 = pilot_record.get("protocol_file_sha256")
+            if (
+                not _is_sha256(protocol_file_sha256)
+                or protocol_file_sha256 != protocol_record.get("file_sha256")
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 pilot validation is not bound to the frozen protocol file"
+                )
+            training_environment_sha256 = pilot_record.get(
+                "training_environment_sha256"
+            )
+            if not _is_sha256(training_environment_sha256):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest has no valid pilot-bound "
+                    "training_environment_sha256"
+                )
+            expected_conditions = list(active_conditions_for_protocol(protocol_mapping))
+            if expected_conditions != ["M0", "M1", "M2", "M3", "M4", "PLIF"] or (
+                pilot_record.get("conditions") != expected_conditions
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest does not bind the ordered six-condition pilot"
+                )
+            for key in (
+                "sha256",
+                "pilot_matrix_manifest_sha256",
+                "pilot_run_manifest_csv_sha256",
+            ):
+                if not _is_sha256(pilot_record.get(key)):
+                    raise FreezeGateError(
+                        "Protocol v7 freeze manifest has an invalid pilot validation/matrix hash"
+                    )
+            datasets = pilot_record.get("datasets")
+            if not isinstance(datasets, Mapping) or set(datasets) != {"cifar100"}:
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest does not bind the CIFAR-100 pilot"
+                )
+            evidence = datasets["cifar100"]
+            required_hashes = (
+                "block_hash",
+                "health_report_sha256",
+                "attempt_receipt_sha256",
+                "pilot_plan_sha256",
+                "shared_weight_sha256",
+                "split_manifest_sha256",
+            )
+            if (
+                not isinstance(evidence, Mapping)
+                or evidence.get("status") != "PASS"
+                or evidence.get("pass") is not True
+                or evidence.get("health_seed")
+                != protocol_mapping["pilot_acceptance"]["health_seed"]
+                or evidence.get("pilot_seed")
+                != protocol_mapping["pilot_acceptance"]["pilot_seed"]
+                or evidence.get("environment_sha256")
+                != training_environment_sha256
+                or any(not _is_sha256(evidence.get(key)) for key in required_hashes)
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest has an inconsistent six-condition "
+                    "pilot/environment binding"
+                )
+            expected_seeds = list(protocol_mapping.get("seeds", ()))
+            matrix_manifest = generated_record.get("matrix_manifest")
+            run_manifest = generated_record.get("run_manifest")
+            if (
+                generated_record.get("run_count") != 48
+                or generated_record.get("config_count") != 48
+                or generated_record.get("conditions") != expected_conditions
+                or len(expected_seeds) != 8
+                or generated_record.get("seeds") != expected_seeds
+                or not _is_sha256(generated_record.get("matrix_hash"))
+                or not _is_sha256(generated_record.get("config_set_sha256"))
+                or not isinstance(matrix_manifest, Mapping)
+                or matrix_manifest.get("path") != "matrix_manifest.json"
+                or not _is_sha256(matrix_manifest.get("sha256"))
+                or not isinstance(run_manifest, Mapping)
+                or run_manifest.get("path") != "run_manifest.csv"
+                or not _is_sha256(run_manifest.get("sha256"))
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest does not bind the exact 48-run formal matrix"
+                )
         if not isinstance(gate_sources, Mapping) or set(gate_sources) != required_sources:
             raise FreezeGateError(
                 f"Protocol v{version} freeze manifest does not bind the complete "
                 f"v{version} gate source set"
+            )
+        malformed_sources = [
+            path
+            for path in required_sources
+            if not isinstance(gate_sources.get(path), Mapping)
+            or gate_sources[path].get("path") != path
+            or not _is_sha256(gate_sources[path].get("file_sha256"))
+        ]
+        if malformed_sources:
+            raise FreezeGateError(
+                f"Protocol v{version} freeze manifest has malformed gate source hashes: "
+                + ", ".join(sorted(malformed_sources))
             )
         validator = pilot_record.get("validator")
         validator_source = gate_sources.get(validator_path)

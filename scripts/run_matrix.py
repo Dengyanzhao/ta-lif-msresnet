@@ -32,6 +32,7 @@ from talif_msresnet.config import (  # noqa: E402
     validate_run_mapping,
 )
 from talif_msresnet.config_v6 import generate_v6_pilot_matrix  # noqa: E402
+from talif_msresnet.config_v7 import generate_v7_pilot_matrix  # noqa: E402
 from talif_msresnet.pilot_v3 import (  # noqa: E402
     PilotBlock,
     PilotV3Error,
@@ -68,6 +69,15 @@ from talif_msresnet.pilot_v6 import (  # noqa: E402
     resolve_pilot_block as resolve_v6_pilot_block,
     validate_health_report as validate_v6_health_report,
 )
+from talif_msresnet.pilot_v7 import (  # noqa: E402
+    PilotBlock as PilotV7Block,
+    PilotV7Error,
+    expected_pilot_configs as expected_v7_pilot_configs,
+    expected_pilot_plan_payload as expected_v7_pilot_plan_payload,
+    require_v7_author_freeze,
+    resolve_pilot_block as resolve_v7_pilot_block,
+    validate_health_report as validate_v7_health_report,
+)
 from talif_msresnet.freeze import FreezeGateError, verify_formal_freeze  # noqa: E402
 from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
 from talif_msresnet.preflight import check_protocol  # noqa: E402
@@ -93,6 +103,9 @@ from pilot_health_gate_v5 import (
 )
 from pilot_health_gate_v6 import (
     validate_current_runtime_against_health_report as validate_v6_current_runtime,
+)
+from pilot_health_gate_v7 import (
+    validate_current_runtime_against_health_report as validate_v7_current_runtime,
 )
 
 PILOT_PLAN_VERSION = 1
@@ -188,6 +201,13 @@ def _is_v5_pilot(protocol: Mapping[str, Any]) -> bool:
 def _is_v6_pilot(protocol: Mapping[str, Any]) -> bool:
     return (
         protocol.get("protocol_version") == 6
+        and protocol.get("study_stage") == "health_pilot_formal"
+    )
+
+
+def _is_v7_pilot(protocol: Mapping[str, Any]) -> bool:
+    return (
+        protocol.get("protocol_version") == 7
         and protocol.get("study_stage") == "health_pilot_formal"
     )
 
@@ -425,6 +445,57 @@ def _validate_v6_pilot_launch_contract(
     return block, block.pilot_output_root, block.pilot_plan, report
 
 
+def _validate_v7_pilot_launch_contract(
+    *,
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    selected_rows: Sequence[dict[str, str]],
+    dataset: str | None,
+    output_root: str | Path | None,
+    pilot_plan: str | Path | None,
+) -> tuple[PilotV7Block, Path, Path, dict[str, Any]]:
+    """Bind the exact six-condition V7 pilot to its disjoint health PASS."""
+
+    try:
+        block = resolve_v7_pilot_block(protocol, repository_root=PROJECT_ROOT)
+    except PilotV7Error as exc:
+        raise ValueError(f"Invalid V7 pilot block: {exc}") from exc
+    if dataset is None:
+        raise ValueError("Protocol V7 pilot execution requires --dataset cifar100")
+    if dataset != block.dataset:
+        raise ValueError(
+            f"Protocol V7 pilot dataset must be {block.dataset!r}, got {dataset!r}"
+        )
+    if len(selected_rows) != len(block.conditions):
+        raise ValueError("The V7 pilot must launch exactly one complete six-condition block")
+    conditions = [str(row.get("condition")) for row in selected_rows]
+    if conditions != list(block.conditions):
+        raise ValueError(
+            "The V7 pilot launch order must be exactly " + ", ".join(block.conditions)
+        )
+    if len({_pilot_block(row) for row in selected_rows}) != 1:
+        raise ValueError(
+            "The V7 pilot rows must belong to one dataset/depth/T/seed block"
+        )
+    selected_block = _pilot_block(selected_rows[0])
+    if selected_block[1] != block.dataset or selected_block[4] != block.pilot_seed:
+        raise ValueError("The selected V7 pilot block differs from the pilot-seed binding")
+    if output_root is not None and _project_path(output_root) != block.pilot_output_root:
+        raise ValueError("--output-root cannot override the V7 pilot output root")
+    if pilot_plan is not None and _project_path(pilot_plan) != block.pilot_plan:
+        raise ValueError("--pilot-plan cannot override the V7 pilot plan")
+    try:
+        report = validate_v7_health_report(
+            block.health_output,
+            protocol_path,
+            repository_root=PROJECT_ROOT,
+            require_current_tracked_clean=True,
+        )
+    except PilotV7Error as exc:
+        raise RuntimeError(f"V7 pilot health-report gate blocked execution: {exc}") from exc
+    return block, block.pilot_output_root, block.pilot_plan, report
+
+
 def _prepare_v3_pilot_plan(
     *,
     block: PilotBlock,
@@ -534,6 +605,35 @@ def _prepare_v6_pilot_plan(
             if existing != expected:
                 raise ValueError(
                     "A different V6 pilot plan already exists; preserve it and create "
+                    "a new protocol generation rather than overwriting it"
+                )
+        else:
+            atomic_write_json(block.pilot_plan, expected)
+    return block.pilot_plan.resolve()
+
+
+def _prepare_v7_pilot_plan(
+    *,
+    block: PilotV7Block,
+    protocol_path: Path,
+    config_dir: Path,
+    manifest_rows: Sequence[dict[str, str]],
+    health_report: Mapping[str, Any],
+) -> Path:
+    expected = expected_v7_pilot_plan_payload(
+        block=block,
+        protocol_path=protocol_path,
+        config_dir=config_dir,
+        manifest_rows=manifest_rows,
+        health_report=health_report,
+        repository_root=PROJECT_ROOT,
+    )
+    with file_lock(block.pilot_plan):
+        if block.pilot_plan.exists():
+            existing = json.loads(block.pilot_plan.read_text(encoding="utf-8"))
+            if existing != expected:
+                raise ValueError(
+                    "A different V7 pilot plan already exists; preserve it and create "
                     "a new protocol generation rather than overwriting it"
                 )
         else:
@@ -745,7 +845,6 @@ def _continuation_action(
             if (
                 metrics.get("failed") not in (0, "0", False)
                 or not (run_dir / "best.pt").exists()
-                or not (run_dir / "last.pt").exists()
             ):
                 raise RuntimeError(f"{run_id}: terminal metrics claim completion but artifacts are inconsistent")
             if resume_matrix:
@@ -810,7 +909,7 @@ def run_matrix(
     protocol_path = _project_path(protocol_path)
     protocol = load_protocol(protocol_path)
     protocol_version = int(protocol.get("protocol_version", 1))
-    if protocol_version in (3, 4, 5, 6) and dry_run:
+    if protocol_version in (3, 4, 5, 6, 7) and dry_run:
         raise ValueError(
             f"Protocol v{protocol_version} matrix dry-runs are disabled; use "
             "generate_run_configs.py --dry-run and reserve training commands for "
@@ -821,8 +920,9 @@ def run_matrix(
     v4_pilot = bool(pilot_active and _is_v4_pilot(protocol))
     v5_pilot = bool(pilot_active and _is_v5_pilot(protocol))
     v6_pilot = bool(pilot_active and _is_v6_pilot(protocol))
+    v7_pilot = bool(pilot_active and _is_v7_pilot(protocol))
     if config_dir is None and config_path is None:
-        if protocol_version in (3, 4, 5, 6):
+        if protocol_version in (3, 4, 5, 6, 7):
             matrix_key = "pilot_matrix" if pilot_active else "formal_matrix"
             config_dir = PROJECT_ROOT / artifact_paths_for_protocol(protocol)[matrix_key]
         else:
@@ -854,7 +954,7 @@ def run_matrix(
     pilot_output_root: Path | None = None
     selected_pilot_plan: Path | None = (
         None
-        if v3_pilot or v4_pilot or v5_pilot or v6_pilot
+        if v3_pilot or v4_pilot or v5_pilot or v6_pilot or v7_pilot
         else _validated_pilot_plan_path(pilot_plan or PILOT_PLAN_PATH)
     )
     pilot_health_path: Path | None = None
@@ -865,12 +965,45 @@ def run_matrix(
     v4_block: PilotV4Block | None = None
     v5_block: PilotV5Block | None = None
     v6_block: PilotV6Block | None = None
+    v7_block: PilotV7Block | None = None
     if pilot_active:
         if config_path is not None:
             raise ValueError("Unfrozen pilots require --config-dir so the full plan is auditable")
         if dry_run:
             raise ValueError("--allow-unfrozen-pilot cannot be combined with --dry-run")
-        if v6_pilot:
+        if v7_pilot:
+            try:
+                require_v7_author_freeze(protocol, repository_root=PROJECT_ROOT)
+            except PilotV7Error as exc:
+                raise ValueError(f"Protocol V7 pilot requires author freeze: {exc}") from exc
+            if condition is not None or limit is not None or experiment is not None:
+                raise ValueError(
+                    "Protocol V7 pilot selection permits only --dataset cifar100; "
+                    "condition, limit, and experiment filters are forbidden"
+                )
+            assert config_dir is not None
+            expected_config_dir = _project_path(
+                artifact_paths_for_protocol(protocol)["pilot_matrix"]
+            )
+            if config_dir != expected_config_dir:
+                raise ValueError(
+                    "Protocol V7 pilot execution must use artifact_paths.pilot_matrix"
+                )
+            (
+                v7_block,
+                pilot_output_root,
+                selected_pilot_plan,
+                pilot_health_report,
+            ) = _validate_v7_pilot_launch_contract(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                selected_rows=rows,
+                dataset=dataset,
+                output_root=output_root,
+                pilot_plan=pilot_plan,
+            )
+            pilot_health_path = v7_block.health_output
+        elif v6_pilot:
             try:
                 require_v6_author_freeze(protocol, repository_root=PROJECT_ROOT)
             except PilotV6Error as exc:
@@ -1033,7 +1166,7 @@ def run_matrix(
         raise RuntimeError(f"Preflight blocked matrix execution:\n{details}")
     if not dry_run and not pilot_active:
         assert config_dir is not None
-        if protocol_version in (3, 4, 5, 6):
+        if protocol_version in (3, 4, 5, 6, 7):
             artifacts = artifact_paths_for_protocol(protocol)
             expected_config_dir = _project_path(artifacts["formal_matrix"])
             expected_output_root = _project_path(artifacts["formal_results"])
@@ -1064,7 +1197,9 @@ def run_matrix(
         except FreezeGateError as exc:
             raise RuntimeError(f"Formal freeze-manifest gate blocked execution: {exc}") from exc
     if pilot_active:
-        if v6_pilot:
+        if v7_pilot:
+            conditions_label = "/".join(v7_block.conditions) if v7_block else "six-condition"
+        elif v6_pilot:
             conditions_label = "/".join(v6_block.conditions) if v6_block else "six-condition"
         else:
             conditions_label = "C1/C2" if v3_pilot or v4_pilot or v5_pilot else "C1-C4"
@@ -1107,7 +1242,7 @@ def run_matrix(
                     f"V2 pilot current-runtime/data gate blocked execution: {exc}"
                 ) from exc
             print("V2_PILOT_CURRENT_CONTEXT_PASS")
-        elif protocol_version in (3, 4, 5, 6) and not dry_run and not pilot_active:
+        elif protocol_version in (3, 4, 5, 6, 7) and not dry_run and not pilot_active:
             _validate_v2_generated_matrix(
                 protocol=protocol,
                 protocol_path=protocol_path,
@@ -1116,6 +1251,32 @@ def run_matrix(
                 matrix_manifest=metadata,
                 label=f"V{protocol_version} formal",
             )
+        elif v7_pilot:
+            assert v7_block is not None
+            assert pilot_health_report is not None
+            _validate_v2_generated_matrix(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                config_dir=config_dir,
+                manifest_rows=all_rows,
+                matrix_manifest=metadata,
+                expected_raw_runs=generate_v7_pilot_matrix(protocol),
+                label="V7 pilot",
+            )
+            pilot_reference_config = expected_v7_pilot_configs(protocol)[0]
+            try:
+                pilot_launch_context = validate_v7_current_runtime(
+                    pilot_health_report,
+                    protocol=protocol,
+                    reference_config=pilot_reference_config,
+                    block=v7_block,
+                    device=str(device or ""),
+                )
+            except PilotV7Error as exc:
+                raise RuntimeError(
+                    f"V7 pilot current-runtime/data gate blocked execution: {exc}"
+                ) from exc
+            print(f"V7_PILOT_CURRENT_CONTEXT_PASS dataset={v7_block.dataset}")
         elif v6_pilot:
             assert v6_block is not None
             assert pilot_health_report is not None
@@ -1235,7 +1396,7 @@ def run_matrix(
         training_output_root = pilot_output_root
         result_root = training_output_root
     else:
-        if protocol_version in (3, 4, 5, 6):
+        if protocol_version in (3, 4, 5, 6, 7):
             training_output_root = _project_path(
                 artifact_paths_for_protocol(protocol)["formal_results"]
             )
@@ -1244,7 +1405,18 @@ def run_matrix(
                 output_root or PROJECT_ROOT / "results" / "runs"
             )
         result_root = training_output_root
-    if v6_pilot:
+    if v7_pilot:
+        assert v7_block is not None
+        assert pilot_health_report is not None
+        assert config_dir is not None
+        pilot_plan_path = _prepare_v7_pilot_plan(
+            block=v7_block,
+            protocol_path=protocol_path,
+            config_dir=config_dir,
+            manifest_rows=all_rows,
+            health_report=pilot_health_report,
+        )
+    elif v6_pilot:
         assert v6_block is not None
         assert pilot_health_report is not None
         assert config_dir is not None
@@ -1336,7 +1508,7 @@ def run_matrix(
                 run_id,
                 planned_hash,
                 resume_matrix=resume_matrix,
-                forbid_fresh_after_attempt=protocol_version in (3, 4, 5, 6)
+                forbid_fresh_after_attempt=protocol_version in (3, 4, 5, 6, 7)
                 and not dry_run,
             )
         except Exception as exc:
@@ -1385,6 +1557,46 @@ def run_matrix(
                     f"[{index}/{len(rows)}] {run_id}: BLOCKED: {exc}",
                     file=sys.stderr,
                 )
+                if stop_on_error:
+                    break
+                continue
+            _event(
+                event_path,
+                {
+                    "event": "run_context_validated",
+                    "index": index,
+                    "total": len(rows),
+                    "run_id": run_id,
+                    "context": run_context,
+                    "timestamp": time.time(),
+                },
+            )
+        elif v7_pilot:
+            assert pilot_health_report is not None
+            assert pilot_reference_config is not None
+            assert v7_block is not None
+            try:
+                run_context = validate_v7_current_runtime(
+                    pilot_health_report,
+                    protocol=protocol,
+                    reference_config=pilot_reference_config,
+                    block=v7_block,
+                    device=str(device or ""),
+                )
+            except PilotV7Error as exc:
+                failures += 1
+                _event(
+                    event_path,
+                    {
+                        "event": "run_blocked",
+                        "index": index,
+                        "total": len(rows),
+                        "run_id": run_id,
+                        "message": f"current runtime/data mismatch: {exc}",
+                        "timestamp": time.time(),
+                    },
+                )
+                print(f"[{index}/{len(rows)}] {run_id}: BLOCKED: {exc}", file=sys.stderr)
                 if stop_on_error:
                     break
                 continue
@@ -1630,7 +1842,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unfrozen-pilot",
         action="store_true",
         help=(
-            "Run the complete protocol-bound non-reportable pilot block; frozen V4-V6 "
+            "Run the complete protocol-bound non-reportable pilot block; frozen V4-V7 "
             "pilots still require their author-freeze and health PASS"
         ),
     )

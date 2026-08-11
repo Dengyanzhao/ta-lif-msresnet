@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,27 @@ def _development_config(condition: str) -> Any:
     )
 
 
+def _passing_condition_evidence(
+    condition: str,
+    *,
+    adaptive_update: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    expects_adaptive = condition in gate.ADAPTIVE_CONDITIONS
+    fixed = {
+        "pass": True,
+        "finite": True,
+        "adaptive_parameter_names": ["neuron.adaptive"] if expects_adaptive else [],
+        "adaptive_update": {"pass": True, "nonzero": adaptive_update, "parameters": {}},
+    }
+    schedule = {
+        "pass": True,
+        "finite": True,
+        "adaptive_enabled_by_epoch": [False] * 5 + [expects_adaptive],
+    }
+    resume = {"pass": True, "resume_exact": True}
+    return fixed, schedule, resume
+
+
 def test_v6_preclaim_resolves_frozen_split_manifest_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -59,6 +81,117 @@ def test_v6_preclaim_resolves_frozen_split_manifest_template(
     assert Path(resolved.data.root) == dataset_root.resolve()
     assert Path(resolved.data.split_manifest) == manifest_path.resolve()
     assert "{" not in resolved.data.split_manifest
+
+
+def test_fixed_health_batch_is_seeded_and_restores_caller_rng(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def random_loader(
+        base: Any, *, seed: int, required_batch_size: int
+    ) -> tuple[Any, torch.Tensor, torch.Tensor, dict[str, str], dict[str, str]]:
+        del seed
+        return (
+            base,
+            torch.rand(required_batch_size, 3, 2, 2),
+            torch.arange(required_batch_size),
+            {"manifest_sha256": "a" * 64},
+            {},
+        )
+
+    monkeypatch.setattr(gate.v3_gate, "load_fixed_real_batch", random_loader)
+    config = _development_config("M0")
+
+    with torch.random.fork_rng(devices=[]):
+        initial = torch.Generator(device="cpu").manual_seed(901).get_state()
+        torch.set_rng_state(initial)
+        caller_state_before_first = torch.get_rng_state().clone()
+        first = gate._load_fixed_health_batch(config, seed=123, required_batch_size=4)
+        assert torch.equal(torch.get_rng_state(), caller_state_before_first)
+
+        torch.rand(17)
+        caller_state_before_second = torch.get_rng_state().clone()
+        second = gate._load_fixed_health_batch(config, seed=123, required_batch_size=4)
+        assert torch.equal(torch.get_rng_state(), caller_state_before_second)
+
+    assert torch.equal(first[1], second[1])
+    assert torch.equal(first[2], second[2])
+    assert gate.legacy_gate.tensor_batch_sha256(first[1], first[2]) == (
+        gate.legacy_gate.tensor_batch_sha256(second[1], second[2])
+    )
+
+
+def test_fixed_health_batch_seed_changes_random_augmentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def random_loader(
+        base: Any, *, seed: int, required_batch_size: int
+    ) -> tuple[Any, torch.Tensor, torch.Tensor, dict[str, str], dict[str, str]]:
+        del seed
+        return (
+            base,
+            torch.rand(required_batch_size, 3, 2, 2),
+            torch.arange(required_batch_size),
+            {"manifest_sha256": "a" * 64},
+            {},
+        )
+
+    monkeypatch.setattr(gate.v3_gate, "load_fixed_real_batch", random_loader)
+    config = _development_config("M0")
+
+    first = gate._load_fixed_health_batch(config, seed=123, required_batch_size=4)
+    second = gate._load_fixed_health_batch(config, seed=124, required_batch_size=4)
+
+    assert not torch.equal(first[1], second[1])
+
+
+@pytest.mark.parametrize("condition", ["M0", "M1"])
+def test_nonadaptive_condition_summary_reports_no_update_and_passes(condition: str) -> None:
+    fixed, schedule, resume = _passing_condition_evidence(
+        condition,
+        adaptive_update=False,
+    )
+
+    report = gate._condition_health_summary(
+        condition,
+        fixed=fixed,
+        schedule=schedule,
+        resume=resume,
+    )
+
+    assert report["status"] == "PASS"
+    assert report["pass"] is True
+    assert report["adaptive_parameter_names"] == []
+    assert report["adaptive_parameter_update_nonzero"] is False
+
+
+@pytest.mark.parametrize("condition", ["M2", "M3", "M4", "PLIF"])
+def test_adaptive_condition_summary_requires_nonzero_update(condition: str) -> None:
+    fixed, schedule, resume = _passing_condition_evidence(
+        condition,
+        adaptive_update=True,
+    )
+    passing = gate._condition_health_summary(
+        condition,
+        fixed=fixed,
+        schedule=schedule,
+        resume=resume,
+    )
+
+    fixed_without_update = {
+        **fixed,
+        "adaptive_update": {**fixed["adaptive_update"], "nonzero": False},
+    }
+    failing = gate._condition_health_summary(
+        condition,
+        fixed=fixed_without_update,
+        schedule=schedule,
+        resume=resume,
+    )
+
+    assert passing["pass"] is True
+    assert passing["adaptive_parameter_update_nonzero"] is True
+    assert failing["pass"] is False
+    assert failing["adaptive_parameter_update_nonzero"] is False
 
 
 def test_v6_initial_forward_is_bitwise_equivalent_on_cpu() -> None:
@@ -145,6 +278,201 @@ def test_schedule_and_resume_boundary_hold_on_cpu(tmp_path: Path) -> None:
     assert schedule["pass"] is True
     assert schedule["adaptive_enabled_by_epoch"] == [False, True]
     assert resume["resume_exact"] is True
+
+
+@pytest.mark.parametrize("hash_matches", [False, True])
+def test_run_gate_binds_preclaim_batch_before_condition_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hash_matches: bool,
+) -> None:
+    config = _development_config("M0")
+    block = SimpleNamespace(
+        conditions=("M0",),
+        health_seed=123,
+        pilot_seed=config.runtime.seed,
+        health_output=tmp_path / "health.json",
+    )
+    inputs = torch.arange(24, dtype=torch.float32).reshape(2, 3, 2, 2)
+    targets = torch.tensor([0, 1])
+    observed_hash = gate.legacy_gate.tensor_batch_sha256(inputs, targets)
+    expected_hash = observed_hash if hash_matches else "0" * 64
+    probe_calls = 0
+
+    monkeypatch.setattr(gate, "seed_everything", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        gate.legacy_gate,
+        "require_target_cuda",
+        lambda *_args, **_kwargs: {"device": "cpu", "name": "test"},
+    )
+    monkeypatch.setattr(gate.legacy_gate, "validate_runtime_environment", lambda *_args: None)
+    monkeypatch.setattr(gate, "validate_v6_runtime_environment", lambda *_args: None)
+    monkeypatch.setattr(
+        gate.legacy_gate,
+        "gpu_idle_precheck",
+        lambda *_args, **_kwargs: {"device_uuid": "CPU-test"},
+    )
+    monkeypatch.setattr(
+        gate,
+        "_training_environment_identity",
+        lambda *_args, **_kwargs: (
+            '{"device":"cpu","hardware":{},"software":{},"precision":"float32"}',
+            "a" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_load_fixed_health_batch",
+        lambda *_args, **_kwargs: (
+            config,
+            inputs,
+            targets,
+            {"manifest_sha256": "b" * 64},
+            {},
+        ),
+    )
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    def condition_probe(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal probe_calls
+        probe_calls += 1
+        raise RuntimeError("condition probe reached")
+
+    monkeypatch.setattr(gate, "_initial_forward_evidence", condition_probe)
+    protocol = {
+        "pilot_acceptance": {
+            "environment": {
+                "expected_gpu_substring": "unused",
+                "cublas_workspace_config": ":4096:8",
+            },
+            "health": {"fixed_batch_size": 2},
+        }
+    }
+    kwargs = {
+        "protocol": protocol,
+        "protocol_path": tmp_path / "protocol.yaml",
+        "config_paths": (),
+        "configs": (config,),
+        "block": block,
+        "device_name": "cpu",
+        "git_identity": {"git_commit": "a" * 40, "tracked_clean": True},
+        "runtime_sources": {},
+        "expected_fixed_batch_sha256": expected_hash,
+    }
+
+    if hash_matches:
+        with pytest.raises(RuntimeError, match="condition probe reached"):
+            gate.run_gate(**kwargs)
+        assert probe_calls == 1
+    else:
+        with pytest.raises(gate.PilotV6Error, match="fixed batch differs from preclaim"):
+            gate.run_gate(**kwargs)
+        assert probe_calls == 0
+
+
+def test_pilot_runtime_reconstructs_fixed_batch_with_seeded_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _development_config("M0")
+    block = SimpleNamespace(
+        dataset="cifar100",
+        health_seed=123,
+        pilot_seed=config.runtime.seed,
+        block_hash="c" * 64,
+    )
+    inputs = torch.arange(24, dtype=torch.float32).reshape(2, 3, 2, 2)
+    targets = torch.tensor([0, 1])
+    batch_hash = gate.legacy_gate.tensor_batch_sha256(inputs, targets)
+    environment_identity = {
+        "device": "cpu",
+        "hardware": {},
+        "software": {},
+        "precision": "float32",
+    }
+    environment_hash = "d" * 64
+    runtime_sources = {"scripts/pilot_health_gate_v6.py": "e" * 64}
+    helper_calls: list[tuple[int, int]] = []
+
+    def fixed_batch_helper(
+        _config: Any, *, seed: int, required_batch_size: int
+    ) -> tuple[Any, torch.Tensor, torch.Tensor, dict[str, str], dict[str, str]]:
+        helper_calls.append((seed, required_batch_size))
+        return (
+            config,
+            inputs,
+            targets,
+            {"manifest_sha256": "f" * 64},
+            {"split_source_fingerprint": "1" * 64},
+        )
+
+    monkeypatch.setattr(
+        gate,
+        "repository_git_identity",
+        lambda _root: {"git_commit": "a" * 40, "tracked_clean": True},
+    )
+    monkeypatch.setattr(gate, "seed_everything", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        gate.legacy_gate,
+        "require_target_cuda",
+        lambda *_args, **_kwargs: {"device": "cpu", "name": "test"},
+    )
+    monkeypatch.setattr(gate.legacy_gate, "validate_runtime_environment", lambda *_args: None)
+    monkeypatch.setattr(gate, "validate_v6_runtime_environment", lambda *_args: None)
+    monkeypatch.setattr(
+        gate,
+        "_training_environment_identity",
+        lambda *_args, **_kwargs: (json.dumps(environment_identity), environment_hash),
+    )
+    monkeypatch.setattr(
+        gate.legacy_gate,
+        "gpu_idle_precheck",
+        lambda *_args, **_kwargs: {"device_uuid": "CPU-test"},
+    )
+    monkeypatch.setattr(gate, "_load_fixed_health_batch", fixed_batch_helper)
+    monkeypatch.setattr(gate, "_runtime_source_hashes", lambda: dict(runtime_sources))
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    report = {
+        "status": "PASS",
+        "pass": True,
+        "git_commit": "a" * 40,
+        "environment": {
+            "training_environment_sha256": environment_hash,
+            "training_environment_identity": environment_identity,
+            "gpu_idle_precheck": {"device_uuid": "CPU-test"},
+        },
+        "source": {
+            "split_manifest_sha256": "f" * 64,
+            "fixed_batch_sha256": batch_hash,
+            "fixed_batch_shape": list(inputs.shape),
+            "fixed_batch_size": 2,
+            "health_seed": block.health_seed,
+            "pilot_seed": block.pilot_seed,
+            "split_source_fingerprint": "1" * 64,
+            "runtime_sources_sha256": runtime_sources,
+        },
+    }
+    protocol = {
+        "pilot_acceptance": {
+            "environment": {
+                "expected_gpu_substring": "unused",
+                "cublas_workspace_config": ":4096:8",
+            },
+            "health": {"fixed_batch_size": 2},
+        }
+    }
+
+    validated = gate.validate_current_runtime_against_health_report(
+        report,
+        protocol=protocol,
+        reference_config=config,
+        block=block,
+        device="cpu",
+    )
+
+    assert validated["pass"] is True
+    assert validated["fixed_batch_sha256"] == batch_hash
+    assert helper_calls == [(block.health_seed, 2)]
 
 
 def test_existing_attempt_receipt_blocks_before_run_gate(

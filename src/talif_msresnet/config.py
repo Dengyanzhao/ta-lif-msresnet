@@ -1053,7 +1053,7 @@ def canonical_json(value: Any) -> str:
 def active_conditions_for_protocol(protocol: Mapping[str, Any]) -> Tuple[str, ...]:
     """Return the ordered condition set without changing legacy global support."""
 
-    if int(protocol.get("protocol_version", 1)) in (3, 4, 5, 6):
+    if int(protocol.get("protocol_version", 1)) in (3, 4, 5, 6, 7):
         values = protocol.get("active_conditions", ())
         if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
             raise ConfigError("active_conditions must be a sequence")
@@ -1075,6 +1075,10 @@ def confirmation_fields_for_protocol(protocol: Mapping[str, Any]) -> Tuple[str, 
         from .config_v6 import V6_PROTOCOL_CONFIRMATION_FIELDS
 
         return V6_PROTOCOL_CONFIRMATION_FIELDS
+    if version == 7:
+        from .config_v7 import V7_PROTOCOL_CONFIRMATION_FIELDS
+
+        return V7_PROTOCOL_CONFIRMATION_FIELDS
     return PROTOCOL_CONFIRMATION_FIELDS
 
 
@@ -1082,7 +1086,7 @@ def artifact_paths_for_protocol(protocol: Mapping[str, Any]) -> Dict[str, str]:
     """Resolve isolated TA-LIF artifacts while preserving legacy path defaults."""
 
     version = int(protocol.get("protocol_version", 1))
-    if version in (3, 4, 5, 6):
+    if version in (3, 4, 5, 6, 7):
         value = protocol.get("artifact_paths")
         if not isinstance(value, Mapping):
             raise ConfigError(
@@ -1298,6 +1302,10 @@ def validate_protocol(raw: Mapping[str, Any]) -> Dict[str, Any]:
         from .config_v6 import validate_v6_protocol
 
         return validate_v6_protocol(raw)
+    if raw_version == 7:
+        from .config_v7 import validate_v7_protocol
+
+        return validate_v7_protocol(raw)
     allowed = {
         "protocol_version", "seeds", "output_root", "data", "datasets", "model",
         "optimizer", "runtime", "matrix", "experiments", "conditions", "analysis",
@@ -2305,6 +2313,10 @@ def validate_run_mapping(raw: Mapping[str, Any], protocol: Mapping[str, Any] | N
         from .config_v6 import validate_v6_run_mapping
 
         return validate_v6_run_mapping(raw, protocol)
+    if raw_version == 7:
+        from .config_v7 import validate_v7_run_mapping
+
+        return validate_v7_run_mapping(raw, protocol)
     allowed = {
         "protocol_version", "experiment", "condition", "run_id", "data", "dataset", "model",
         "optimizer", "runtime", "seed", "final_test", "analysis",
@@ -2408,6 +2420,10 @@ def generate_run_matrix(protocol: Mapping[str, Any]) -> List[Dict[str, Any]]:
         from .config_v6 import generate_v6_formal_matrix
 
         return generate_v6_formal_matrix(protocol)
+    if protocol["protocol_version"] == 7:
+        from .config_v7 import generate_v7_formal_matrix
+
+        return generate_v7_formal_matrix(protocol)
     protocol_hash = hashlib.sha256(canonical_json(protocol).encode()).hexdigest()
     active_conditions = active_conditions_for_protocol(protocol)
     runs: List[Dict[str, Any]] = []

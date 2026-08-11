@@ -10,8 +10,9 @@ import json
 import math
 import os
 import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -34,6 +35,17 @@ from talif_msresnet.config_v6 import (  # noqa: E402
 from talif_msresnet.benchmark_v6 import (  # noqa: E402
     V6BenchmarkError,
     validate_receipt as validate_v6_benchmark_receipt,
+)
+from talif_msresnet.benchmark_v7 import (  # noqa: E402
+    V7BenchmarkError,
+    canonical_bound_paths as v7_canonical_bound_paths,
+    expected_receipt_path as expected_v7_benchmark_receipt_path,
+    repository_git_identity as v7_repository_git_identity,
+    validate_receipt as validate_v7_benchmark_receipt,
+)
+from talif_msresnet.config_v7 import (  # noqa: E402
+    canonicalize_v7_artifact_run_mapping,
+    validate_v7_cifar100_provenance_files,
 )
 from talif_msresnet.data import build_test_loader  # noqa: E402
 from talif_msresnet.freeze import verify_formal_freeze  # noqa: E402
@@ -60,6 +72,10 @@ from talif_msresnet.utils import (  # noqa: E402
 
 JOURNAL_NAME = "final_test.in_progress.json"
 LOCK_NAME = "final_test.lock"
+V7_BENCHMARK_BINDING_KEYS = frozenset(
+    {"benchmark_receipt", "benchmark_receipt_sha256"}
+)
+V7ReceiptValidator = Callable[[], dict[str, str]]
 
 
 def _recovery_instruction(run_id: str) -> str:
@@ -282,10 +298,17 @@ def _audit_all_frozen(
     protocol_hash: str,
     protocol: Mapping[str, Any],
     v6_test_source: Mapping[str, str] | None = None,
+    v7_test_source: Mapping[str, str] | None = None,
+    v7_benchmark_binding: Mapping[str, str] | None = None,
 ) -> None:
-    is_v6 = int(protocol.get("protocol_version", 1)) == 6
+    protocol_version = int(protocol.get("protocol_version", 1))
+    is_v6 = protocol_version == 6
+    is_v7 = protocol_version == 7
     if is_v6:
         v6_test_source = _require_v6_test_source_binding(v6_test_source)
+    if is_v7:
+        v7_test_source = _require_v7_test_source_binding(v7_test_source)
+        v7_benchmark_binding = _require_v7_benchmark_binding(v7_benchmark_binding)
     errors: list[str] = []
     for row in rows:
         run_id = row["run_id"]
@@ -342,17 +365,37 @@ def _audit_all_frozen(
                         )
                     except RuntimeError as exc:
                         errors.append(str(exc))
+                if is_v7:
+                    try:
+                        _validate_v7_marker_evidence_record(
+                            marker_value,
+                            v7_test_source,
+                            v7_benchmark_binding,
+                            label=f"{run_id}: final-test marker",
+                        )
+                        _validate_v7_manifest_final_test_record(
+                            _load_v6_run_manifest(run_dir, label=run_id),
+                            v7_test_source,
+                            v7_benchmark_binding,
+                            checkpoint_sha256=checkpoint_sha256,
+                            evaluated_at=marker_value.get("evaluated_at"),
+                            samples=marker_value.get("test_samples"),
+                            label=run_id,
+                        )
+                    except RuntimeError as exc:
+                        errors.append(str(exc))
             except Exception as exc:
                 errors.append(f"{run_id}: malformed final_test.json: {exc}")
         payload = load_checkpoint(checkpoint, map_location="cpu")
         config = _mapping(payload.get("config"), f"{run_id} checkpoint config")
-        if int(protocol.get("protocol_version", 1)) == 6:
+        if protocol_version in (6, 7):
             try:
-                normalized = canonicalize_v6_artifact_run_mapping(
-                    config,
-                    protocol,
-                    project_root=PROJECT_ROOT,
+                canonicalizer = (
+                    canonicalize_v6_artifact_run_mapping
+                    if protocol_version == 6
+                    else canonicalize_v7_artifact_run_mapping
                 )
+                normalized = canonicalizer(config, protocol, project_root=PROJECT_ROOT)
                 resolved = validate_run_mapping(normalized, protocol)
             except Exception as exc:
                 errors.append(f"{run_id}: checkpoint run contract is invalid: {exc}")
@@ -404,8 +447,82 @@ def _v6_benchmark_binding_rows(
     return bindings
 
 
+def _v7_benchmark_binding_rows(
+    rows: list[dict[str, str]],
+    metrics_by_id: Mapping[str, Mapping[str, Any]],
+    results_root: Path,
+) -> list[dict[str, Any]]:
+    """Bind V7 receipt validation to the current 48 formal checkpoints."""
+
+    return _v6_benchmark_binding_rows(rows, metrics_by_id, results_root)
+
+
+def _v7_benchmark_receipt_binding(
+    *,
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    protocol_hash: str,
+    rows: list[dict[str, str]],
+    metrics_by_id: Mapping[str, Mapping[str, Any]],
+    results_root: Path,
+) -> dict[str, str]:
+    """Revalidate the canonical V7 receipt and return its exact evidence binding."""
+
+    commit, clean = v7_repository_git_identity(PROJECT_ROOT)
+    if not clean:
+        raise RuntimeError("V7 final-test requires a clean tracked release commit")
+    bound_paths = v7_canonical_bound_paths(protocol, PROJECT_ROOT)
+    for label, path in bound_paths.items():
+        if not path.is_file():
+            raise FileNotFoundError(f"V7 final-test bound {label} is missing: {path}")
+    receipt_path = expected_v7_benchmark_receipt_path(protocol, PROJECT_ROOT)
+    if not receipt_path.is_file():
+        raise FileNotFoundError(
+            "V7 validation-only benchmark receipt is missing; test access is blocked"
+        )
+    receipt_hash_before = sha256_file(receipt_path)
+    validate_v7_benchmark_receipt(
+        project_root=PROJECT_ROOT,
+        protocol=protocol,
+        protocol_path=protocol_path,
+        protocol_hash=protocol_hash,
+        expected_git_commit=commit,
+        expected_matrix_manifest_sha256=sha256_file(bound_paths["matrix_manifest"]),
+        expected_freeze_manifest_sha256=sha256_file(bound_paths["freeze_manifest"]),
+        expected_formal_rows=_v7_benchmark_binding_rows(
+            rows,
+            metrics_by_id,
+            results_root,
+        ),
+    )
+    receipt_hash_after = sha256_file(receipt_path)
+    if receipt_hash_after != receipt_hash_before:
+        raise RuntimeError("V7 benchmark receipt changed during validation")
+    try:
+        receipt_reference = receipt_path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError as exc:
+        raise RuntimeError("V7 benchmark receipt escapes the repository") from exc
+    binding = {
+        "benchmark_receipt": receipt_reference,
+        "benchmark_receipt_sha256": receipt_hash_after,
+    }
+    return dict(_require_v7_benchmark_binding(binding))
+
+
 def _v6_cifar100_test_source_record(protocol: Mapping[str, Any]) -> dict[str, str]:
     binding = validate_v6_cifar100_provenance_files(
+        protocol,
+        project_root=PROJECT_ROOT,
+    )
+    return {
+        "test_source": binding["cifar100_test_pickle"],
+        "test_source_sha256": binding["cifar100_test_pickle_sha256"],
+        **binding,
+    }
+
+
+def _v7_cifar100_test_source_record(protocol: Mapping[str, Any]) -> dict[str, str]:
+    binding = validate_v7_cifar100_provenance_files(
         protocol,
         project_root=PROJECT_ROOT,
     )
@@ -429,6 +546,25 @@ _V6_FINAL_TEST_SOURCE_KEYS = frozenset(
     }
 )
 
+_V7_FINAL_TEST_SOURCE_KEYS = frozenset(
+    {
+        "test_source",
+        "test_source_sha256",
+        "cifar100_source_provenance",
+        "cifar100_source_provenance_sha256",
+        "cifar100_archive",
+        "cifar100_archive_sha256",
+        "cifar100_train_pickle",
+        "cifar100_train_pickle_sha256",
+        "cifar100_test_pickle",
+        "cifar100_test_pickle_sha256",
+        "cifar100_meta_pickle",
+        "cifar100_meta_pickle_sha256",
+        "cifar100_split_manifest",
+        "cifar100_split_manifest_sha256",
+    }
+)
+
 
 def _require_v6_test_source_binding(value: Mapping[str, str] | None) -> Mapping[str, str]:
     if value is None:
@@ -445,14 +581,71 @@ def _require_v6_test_source_binding(value: Mapping[str, str] | None) -> Mapping[
     return value
 
 
+def _require_v7_test_source_binding(value: Mapping[str, str] | None) -> Mapping[str, str]:
+    if value is None:
+        raise RuntimeError("V7 final-test audit requires a frozen CIFAR-100 source binding")
+    observed = set(value)
+    if observed != _V7_FINAL_TEST_SOURCE_KEYS:
+        raise RuntimeError(
+            "V7 final-test source binding has an invalid field set: "
+            f"missing={sorted(_V7_FINAL_TEST_SOURCE_KEYS - observed)}, "
+            f"extra={sorted(observed - _V7_FINAL_TEST_SOURCE_KEYS)}"
+        )
+    if any(not isinstance(value[key], str) or not value[key].strip() for key in value):
+        raise RuntimeError("V7 final-test source binding contains an empty or non-string value")
+    return value
+
+
+def _require_v7_benchmark_binding(
+    value: Mapping[str, str] | None,
+) -> Mapping[str, str]:
+    if value is None or set(value) != V7_BENCHMARK_BINDING_KEYS:
+        raise RuntimeError("V7 final-test requires the exact benchmark receipt binding")
+    receipt = value.get("benchmark_receipt")
+    receipt_hash = value.get("benchmark_receipt_sha256")
+    if not isinstance(receipt, str) or not receipt.strip() or Path(receipt).is_absolute():
+        raise RuntimeError("V7 benchmark receipt binding must be repository-relative")
+    try:
+        resolved = (PROJECT_ROOT / receipt).resolve()
+        resolved.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise RuntimeError("V7 benchmark receipt binding escapes the repository") from exc
+    if (
+        not isinstance(receipt_hash, str)
+        or len(receipt_hash) != 64
+        or any(character not in "0123456789abcdef" for character in receipt_hash)
+    ):
+        raise RuntimeError("V7 benchmark receipt binding has an invalid SHA-256")
+    return value
+
+
+def _validate_v7_benchmark_binding_record(
+    observed: Any,
+    expected: Mapping[str, str],
+    *,
+    label: str,
+) -> None:
+    _require_v7_benchmark_binding(expected)
+    if not isinstance(observed, Mapping):
+        raise RuntimeError(f"{label} is not a JSON object")
+    selected = {key: observed.get(key) for key in V7_BENCHMARK_BINDING_KEYS}
+    if selected != dict(expected):
+        raise RuntimeError(f"{label} differs from the validated V7 benchmark receipt")
+
+
 def _test_source_record(
     config: Any,
     protocol: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if int(protocol.get("protocol_version", 1)) == 6:
+    protocol_version = int(protocol.get("protocol_version", 1))
+    if protocol_version == 6:
         if config.data.dataset != "cifar100":
             raise RuntimeError("V6 final-test source binding requires CIFAR-100")
         return _v6_cifar100_test_source_record(protocol)
+    if protocol_version == 7:
+        if config.data.dataset != "cifar100":
+            raise RuntimeError("V7 final-test source binding requires CIFAR-100")
+        return _v7_cifar100_test_source_record(protocol)
     if config.data.dataset != "cifar10dvs":
         return {
             "test_source": f"torchvision official {config.data.dataset} test partition",
@@ -484,6 +677,17 @@ def _validate_v6_test_source_record(
         raise RuntimeError(f"{label} differs from the frozen V6 CIFAR-100 test-source binding")
 
 
+def _validate_v7_test_source_record(
+    observed: Any,
+    expected: Mapping[str, str],
+    *,
+    label: str,
+) -> None:
+    _require_v7_test_source_binding(expected)
+    if not isinstance(observed, Mapping) or dict(observed) != dict(expected):
+        raise RuntimeError(f"{label} differs from the frozen V7 CIFAR-100 test-source binding")
+
+
 def _validate_v6_marker_test_source_record(
     marker: Any,
     expected: Mapping[str, str],
@@ -496,6 +700,27 @@ def _validate_v6_marker_test_source_record(
         {key: marker.get(key) for key in expected},
         expected,
         label=label,
+    )
+
+
+def _validate_v7_marker_evidence_record(
+    marker: Any,
+    expected_source: Mapping[str, str],
+    expected_benchmark: Mapping[str, str],
+    *,
+    label: str,
+) -> None:
+    if not isinstance(marker, Mapping):
+        raise RuntimeError(f"{label} is not a JSON object")
+    _validate_v7_test_source_record(
+        {key: marker.get(key) for key in expected_source},
+        expected_source,
+        label=f"{label} test source",
+    )
+    _validate_v7_benchmark_binding_record(
+        marker,
+        expected_benchmark,
+        label=f"{label} benchmark binding",
     )
 
 
@@ -534,6 +759,48 @@ def _validate_v6_manifest_final_test_record(
         {key: final_test.get(key) for key in expected_source},
         expected_source,
         label=f"{label} run manifest final-test source",
+    )
+
+
+def _validate_v7_manifest_final_test_record(
+    manifest: Any,
+    expected_source: Mapping[str, str],
+    expected_benchmark: Mapping[str, str],
+    *,
+    checkpoint_sha256: str,
+    evaluated_at: Any,
+    samples: Any,
+    label: str,
+) -> None:
+    if not isinstance(manifest, Mapping):
+        raise RuntimeError(f"{label} run manifest is not a JSON object")
+    final_test = manifest.get("final_test")
+    if not isinstance(final_test, Mapping):
+        raise RuntimeError(f"{label} run manifest has no committed final_test record")
+    expected_fields = {
+        "status": "complete",
+        "checkpoint": "best.pt",
+        "checkpoint_sha256": checkpoint_sha256,
+        "evaluated_at": evaluated_at,
+        "samples": samples,
+    }
+    mismatches = [
+        key for key, expected in expected_fields.items() if final_test.get(key) != expected
+    ]
+    if mismatches:
+        raise RuntimeError(
+            f"{label} run manifest final_test differs from its transaction at: "
+            + ", ".join(mismatches)
+        )
+    _validate_v7_test_source_record(
+        {key: final_test.get(key) for key in expected_source},
+        expected_source,
+        label=f"{label} run manifest final-test source",
+    )
+    _validate_v7_benchmark_binding_record(
+        final_test,
+        expected_benchmark,
+        label=f"{label} run manifest final-test benchmark binding",
     )
 
 
@@ -578,9 +845,25 @@ def _cleanup_transaction(run_dir: Path) -> None:
     lock_path.unlink(missing_ok=True)
 
 
-def _commit_final_test(run_dir: Path, results_root: Path, journal: Mapping[str, Any]) -> None:
+def _commit_final_test(
+    run_dir: Path,
+    results_root: Path,
+    journal: Mapping[str, Any],
+    *,
+    v7_receipt_validator: V7ReceiptValidator | None = None,
+) -> None:
     if journal.get("stage") != "results_ready":
         raise RuntimeError(f"{run_dir.name}: transaction has no recoverable final-test result")
+    v7_benchmark_binding: dict[str, str] = {}
+    if v7_receipt_validator is not None:
+        v7_benchmark_binding = dict(
+            _require_v7_benchmark_binding(v7_receipt_validator())
+        )
+        _validate_v7_benchmark_binding_record(
+            journal,
+            v7_benchmark_binding,
+            label=f"{run_dir.name}: final-test journal benchmark binding",
+        )
     result = _mapping(journal.get("test"), "transaction test result")
     checkpoint_hash = str(journal["checkpoint_sha256"])
     evaluated_at = str(journal["evaluated_at"])
@@ -613,6 +896,7 @@ def _commit_final_test(run_dir: Path, results_root: Path, journal: Mapping[str, 
         "evaluated_at": evaluated_at,
         "samples": int(result["samples"]),
         **test_source,
+        **v7_benchmark_binding,
     }
     atomic_write_json(manifest_path, manifest)
 
@@ -640,6 +924,7 @@ def _commit_final_test(run_dir: Path, results_root: Path, journal: Mapping[str, 
         "test_accuracy": float(result["accuracy"]),
         "test_samples": int(result["samples"]),
         **test_source,
+        **v7_benchmark_binding,
     }
     # This marker is the atomic commit record and is deliberately written last.
     atomic_write_json(run_dir / "final_test.json", marker)
@@ -652,9 +937,17 @@ def _recover_one(
     protocol_hash: str,
     *,
     v6_test_source: Mapping[str, str] | None = None,
+    v7_test_source: Mapping[str, str] | None = None,
+    v7_receipt_validator: V7ReceiptValidator | None = None,
 ) -> str:
     if v6_test_source is not None:
         v6_test_source = _require_v6_test_source_binding(v6_test_source)
+    v7_benchmark_binding: Mapping[str, str] | None = None
+    if v7_test_source is not None or v7_receipt_validator is not None:
+        v7_test_source = _require_v7_test_source_binding(v7_test_source)
+        if v7_receipt_validator is None:
+            raise RuntimeError("V7 recovery requires current benchmark receipt validation")
+        v7_benchmark_binding = _require_v7_benchmark_binding(v7_receipt_validator())
     journal_path, lock_path = _transaction_paths(run_dir)
     marker_path = run_dir / "final_test.json"
     if not journal_path.exists():
@@ -675,6 +968,17 @@ def _recover_one(
             journal.get("test_source"),
             v6_test_source,
             label=f"{run_dir.name}: final-test journal source",
+        )
+    if v7_benchmark_binding is not None:
+        _validate_v7_test_source_record(
+            journal.get("test_source"),
+            v7_test_source,
+            label=f"{run_dir.name}: final-test journal source",
+        )
+        _validate_v7_benchmark_binding_record(
+            journal,
+            v7_benchmark_binding,
+            label=f"{run_dir.name}: final-test journal benchmark binding",
         )
     if marker_path.exists():
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -705,6 +1009,34 @@ def _recover_one(
                     samples=result.get("samples"),
                     label=run_dir.name,
                 )
+            if v7_benchmark_binding is not None:
+                if journal.get("stage") != "results_ready":
+                    raise RuntimeError(
+                        f"{run_dir.name}: committed V7 marker has no results_ready journal"
+                    )
+                result = _mapping(journal.get("test"), "transaction test result")
+                if (
+                    marker.get("evaluated_at") != journal.get("evaluated_at")
+                    or marker.get("test_samples") != result.get("samples")
+                ):
+                    raise RuntimeError(
+                        f"{run_dir.name}: committed V7 marker differs from its transaction journal"
+                    )
+                _validate_v7_marker_evidence_record(
+                    marker,
+                    v7_test_source,
+                    v7_benchmark_binding,
+                    label=f"{run_dir.name}: final-test marker",
+                )
+                _validate_v7_manifest_final_test_record(
+                    _load_v6_run_manifest(run_dir, label=run_dir.name),
+                    v7_test_source,
+                    v7_benchmark_binding,
+                    checkpoint_sha256=checkpoint_hash,
+                    evaluated_at=journal.get("evaluated_at"),
+                    samples=result.get("samples"),
+                    label=run_dir.name,
+                )
             _cleanup_transaction(run_dir)
             return "cleaned_committed_transaction"
         raise RuntimeError(f"{run_dir.name}: marker and transaction journal disagree")
@@ -724,7 +1056,27 @@ def _recover_one(
                     samples=result.get("samples"),
                     label=run_dir.name,
                 )
-    _commit_final_test(run_dir, results_root, journal)
+    if v7_benchmark_binding is not None:
+        manifest_path = run_dir / "run_manifest.json"
+        if manifest_path.exists():
+            manifest = _load_v6_run_manifest(run_dir, label=run_dir.name)
+            if "final_test" in manifest:
+                result = _mapping(journal.get("test"), "transaction test result")
+                _validate_v7_manifest_final_test_record(
+                    manifest,
+                    v7_test_source,
+                    v7_benchmark_binding,
+                    checkpoint_sha256=checkpoint_hash,
+                    evaluated_at=journal.get("evaluated_at"),
+                    samples=result.get("samples"),
+                    label=run_dir.name,
+                )
+    _commit_final_test(
+        run_dir,
+        results_root,
+        journal,
+        v7_receipt_validator=v7_receipt_validator,
+    )
     _cleanup_transaction(run_dir)
     return "recovered_without_test_access"
 
@@ -735,9 +1087,18 @@ def _evaluate_one(
     results_root: Path,
     protocol: Mapping[str, Any],
     v6_test_source: Mapping[str, str] | None = None,
+    v7_test_source: Mapping[str, str] | None = None,
+    v7_receipt_validator: V7ReceiptValidator | None = None,
 ) -> str:
     if v6_test_source is not None:
         v6_test_source = _require_v6_test_source_binding(v6_test_source)
+    v7_benchmark_binding: Mapping[str, str] | None = None
+    if v7_test_source is not None or v7_receipt_validator is not None:
+        v7_test_source = _require_v7_test_source_binding(v7_test_source)
+        if v7_receipt_validator is None:
+            raise RuntimeError("V7 final-test requires current benchmark receipt validation")
+        # This gate must run before any test loader can be constructed.
+        v7_benchmark_binding = _require_v7_benchmark_binding(v7_receipt_validator())
     checkpoint_path = run_dir / "best.pt"
     checkpoint_hash = sha256_file(checkpoint_path)
     marker_path = run_dir / "final_test.json"
@@ -758,6 +1119,22 @@ def _evaluate_one(
                     samples=marker.get("test_samples"),
                     label=run_dir.name,
                 )
+            if v7_benchmark_binding is not None:
+                _validate_v7_marker_evidence_record(
+                    marker,
+                    v7_test_source,
+                    v7_benchmark_binding,
+                    label=f"{run_dir.name}: final-test marker",
+                )
+                _validate_v7_manifest_final_test_record(
+                    _load_v6_run_manifest(run_dir, label=run_dir.name),
+                    v7_test_source,
+                    v7_benchmark_binding,
+                    checkpoint_sha256=checkpoint_hash,
+                    evaluated_at=marker.get("evaluated_at"),
+                    samples=marker.get("test_samples"),
+                    label=run_dir.name,
+                )
             return "already_complete"
         raise FileExistsError(f"{marker_path} belongs to a different checkpoint; refusing to overwrite")
     journal_path, lock_path = _transaction_paths(run_dir)
@@ -766,8 +1143,14 @@ def _evaluate_one(
 
     payload = load_checkpoint(checkpoint_path, map_location="cpu")
     raw_config = _mapping(payload.get("config"), "checkpoint config")
-    if int(protocol.get("protocol_version", 1)) == 6:
-        normalized = canonicalize_v6_artifact_run_mapping(
+    protocol_version = int(protocol.get("protocol_version", 1))
+    if protocol_version in (6, 7):
+        canonicalizer = (
+            canonicalize_v6_artifact_run_mapping
+            if protocol_version == 6
+            else canonicalize_v7_artifact_run_mapping
+        )
+        normalized = canonicalizer(
             raw_config,
             protocol,
             project_root=PROJECT_ROOT,
@@ -804,12 +1187,24 @@ def _evaluate_one(
         "started_at": utc_now(),
         "device": str(device),
         "test_source": _test_source_record(config, protocol),
+        **(dict(v7_benchmark_binding) if v7_benchmark_binding is not None else {}),
     }
     if v6_test_source is not None:
         _validate_v6_test_source_record(
             journal["test_source"],
             v6_test_source,
             label=f"{run_dir.name}: final-test source",
+        )
+    if v7_benchmark_binding is not None:
+        _validate_v7_test_source_record(
+            journal["test_source"],
+            v7_test_source,
+            label=f"{run_dir.name}: final-test source",
+        )
+        _validate_v7_benchmark_binding_record(
+            journal,
+            v7_benchmark_binding,
+            label=f"{run_dir.name}: prepared journal benchmark binding",
         )
     journal_path, _ = _begin_transaction(run_dir, journal)
     test_access_started = False
@@ -831,7 +1226,12 @@ def _evaluate_one(
             },
         })
         atomic_write_json(journal_path, journal)
-        _commit_final_test(run_dir, results_root, journal)
+        _commit_final_test(
+            run_dir,
+            results_root,
+            journal,
+            v7_receipt_validator=v7_receipt_validator,
+        )
         _cleanup_transaction(run_dir)
         return "evaluated"
     except BaseException:
@@ -881,6 +1281,9 @@ def main(argv: list[str] | None = None) -> int:
     protocol_version = int(protocol.get("protocol_version", 1))
     expected_training_environment_sha256: str | None = None
     v6_test_source: dict[str, str] | None = None
+    v7_test_source: dict[str, str] | None = None
+    v7_benchmark_binding: dict[str, str] | None = None
+    v7_receipt_validator: V7ReceiptValidator | None = None
     if protocol_version == 6:
         try:
             v6_test_source = _v6_cifar100_test_source_record(protocol)
@@ -889,7 +1292,15 @@ def main(argv: list[str] | None = None) -> int:
                 "V6 final-test blocked by CIFAR-100 source provenance: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
-    if protocol_version in (3, 4, 5, 6):
+    if protocol_version == 7:
+        try:
+            v7_test_source = _v7_cifar100_test_source_record(protocol)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(
+                "V7 final-test blocked by CIFAR-100 source provenance: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+    if protocol_version in (3, 4, 5, 6, 7):
         if results_root != default_results.resolve():
             raise SystemExit(
                 f"Protocol v{protocol_version} final test must use "
@@ -900,7 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Protocol v{protocol_version} final test must use "
                 "artifact_paths.formal_matrix"
             )
-    if protocol_version in (4, 5, 6):
+    if protocol_version in (4, 5, 6, 7):
         freeze_manifest = verify_formal_freeze(
             project_root=PROJECT_ROOT,
             protocol_path=args.protocol,
@@ -962,6 +1373,30 @@ def main(argv: list[str] | None = None) -> int:
                 "V6 final-test blocked by validation-only benchmark receipt: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+    if protocol_version == 7:
+        protocol_path = Path(args.protocol)
+        protocol_path = (
+            protocol_path if protocol_path.is_absolute() else PROJECT_ROOT / protocol_path
+        ).resolve()
+
+        def validate_current_v7_receipt() -> dict[str, str]:
+            return _v7_benchmark_receipt_binding(
+                protocol=protocol,
+                protocol_path=protocol_path,
+                protocol_hash=report.protocol_hash,
+                rows=rows,
+                metrics_by_id=metrics_by_id,
+                results_root=results_root,
+            )
+
+        v7_receipt_validator = validate_current_v7_receipt
+        try:
+            v7_benchmark_binding = v7_receipt_validator()
+        except (OSError, V7BenchmarkError, RuntimeError) as exc:
+            raise SystemExit(
+                "V7 final-test blocked by validation-only benchmark receipt: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     if args.recover_run:
         planned_ids = {row["run_id"] for row in rows}
         if args.recover_run not in planned_ids:
@@ -971,6 +1406,8 @@ def main(argv: list[str] | None = None) -> int:
             results_root,
             report.protocol_hash,
             v6_test_source=v6_test_source,
+            v7_test_source=v7_test_source,
+            v7_receipt_validator=v7_receipt_validator,
         )
         print(f"{args.recover_run}: {status}")
         return 0
@@ -980,6 +1417,8 @@ def main(argv: list[str] | None = None) -> int:
         report.protocol_hash,
         protocol,
         v6_test_source=v6_test_source,
+        v7_test_source=v7_test_source,
+        v7_benchmark_binding=v7_benchmark_binding,
     )
     pending = [row for row in rows if not (results_root / row["run_id"] / "final_test.json").exists()]
     if args.limit is not None:
@@ -994,6 +1433,8 @@ def main(argv: list[str] | None = None) -> int:
                 results_root,
                 protocol,
                 v6_test_source=v6_test_source,
+                v7_test_source=v7_test_source,
+                v7_receipt_validator=v7_receipt_validator,
             )
             print(f"[{index}/{len(pending)}] {row['run_id']}: {status}")
         except Exception as exc:
