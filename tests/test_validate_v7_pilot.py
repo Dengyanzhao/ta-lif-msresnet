@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import copy
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -14,7 +17,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import validate_v7_pilot as validator
 
 from talif_msresnet import pilot_v7
-from talif_msresnet.config import load_protocol
+from talif_msresnet.config import load_protocol, validate_run_mapping
+from talif_msresnet.config_v7 import generate_v7_pilot_matrix
+from talif_msresnet.utils import stable_hash
 
 
 def test_recovered_health_plan_binds_execution_and_recovery_commits(
@@ -346,3 +351,193 @@ def test_main_refuses_to_overwrite_canonical_validation(
 
     assert validator.main(["--protocol", str(tmp_path / "protocol.yaml")]) == 2
     assert output.read_bytes() == original
+
+
+def _v7_recovery_artifact_config(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    protocol = load_protocol(ROOT / "configs" / "protocol_v7_mechanism.yaml")
+    raw = copy.deepcopy(generate_v7_pilot_matrix(protocol)[0])
+    config = validate_run_mapping(raw, protocol)
+    artifact = config.as_dict()
+    artifact["runtime"]["device"] = "cuda:0"
+    artifact["runtime"]["output_dir"] = str(
+        tmp_path / config.runtime.output_dir
+    )
+    return protocol, config, artifact
+
+
+@pytest.mark.parametrize("device", ["cuda", "cuda:1", "cpu", None])
+def test_device_recovery_rejects_any_unapproved_device_alias(
+    tmp_path: Path, device: str | None
+) -> None:
+    protocol, config, artifact = _v7_recovery_artifact_config(tmp_path)
+    artifact["runtime"]["device"] = device
+
+    _hash, failures = validator._recovery_config_identity(
+        artifact,
+        label="artifact",
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+    )
+
+    assert failures
+    assert any("reviewed execution device" in failure for failure in failures)
+
+
+def test_device_recovery_binds_raw_execution_hash_and_all_config_channels(
+    tmp_path: Path,
+) -> None:
+    protocol, config, artifact = _v7_recovery_artifact_config(tmp_path)
+    execution_hash = stable_hash(artifact)
+    run_manifest = {"config": copy.deepcopy(artifact), "execution_hash": execution_hash}
+
+    assert validator._stored_recovery_execution_identity_failures(
+        run_manifest["config"],
+        run_manifest["execution_hash"],
+        label="run_manifest.json",
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+        reference_raw=artifact,
+        reference_execution_hash=execution_hash,
+    ) == []
+
+    run_manifest["execution_hash"] = "0" * 64
+    failures = validator._stored_recovery_execution_identity_failures(
+        run_manifest["config"],
+        run_manifest["execution_hash"],
+        label="run_manifest.json",
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+        reference_raw=artifact,
+        reference_execution_hash=execution_hash,
+    )
+    assert any("does not hash its raw config" in failure for failure in failures)
+
+    run_manifest["execution_hash"] = execution_hash
+    run_manifest["config"]["runtime"]["device"] = "cuda:1"
+    failures = validator._stored_recovery_execution_identity_failures(
+        run_manifest["config"],
+        run_manifest["execution_hash"],
+        label="run_manifest.json",
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+        reference_raw=artifact,
+        reference_execution_hash=execution_hash,
+    )
+    assert failures
+
+
+def test_device_recovery_binds_both_checkpoint_execution_identities(
+    tmp_path: Path,
+) -> None:
+    protocol, config, artifact = _v7_recovery_artifact_config(tmp_path)
+    execution_hash = stable_hash(artifact)
+    checkpoint = {
+        "config": copy.deepcopy(artifact),
+        "execution_hash": execution_hash,
+    }
+    best = tmp_path / "best.pt"
+    last = tmp_path / "last.pt"
+    torch.save(checkpoint, best)
+    torch.save(checkpoint, last)
+
+    for path in (best, last):
+        assert validator._checkpoint_recovery_execution_identity_failures(
+            path,
+            label=path.name,
+            protocol=protocol,
+            repository_root=tmp_path,
+            expected_config=config,
+            reference_raw=artifact,
+            reference_execution_hash=execution_hash,
+        ) == []
+
+    checkpoint["execution_hash"] = "0" * 64
+    torch.save(checkpoint, last)
+    failures = validator._checkpoint_recovery_execution_identity_failures(
+        last,
+        label=last.name,
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+        reference_raw=artifact,
+        reference_execution_hash=execution_hash,
+    )
+    assert any("does not hash its raw config" in failure for failure in failures)
+
+
+def test_device_recovery_requires_exactly_one_trainer_start_on_cuda_zero(
+    tmp_path: Path,
+) -> None:
+    _protocol, config, _artifact = _v7_recovery_artifact_config(tmp_path)
+    start = {
+        "event": "run_started",
+        "device": "cuda:0",
+        "dry_run": False,
+        "config_hash": config.config_hash,
+    }
+
+    assert validator._trainer_recovery_launch_failures([start], expected_config=config) == []
+    assert validator._trainer_recovery_launch_failures([], expected_config=config)
+    assert validator._trainer_recovery_launch_failures(
+        [start, start], expected_config=config
+    )
+    wrong_device = {**start, "device": "cuda:1"}
+    assert any(
+        "reviewed execution device" in failure
+        for failure in validator._trainer_recovery_launch_failures(
+            [wrong_device], expected_config=config
+        )
+    )
+
+
+def test_device_recovery_matrix_audits_exact_cuda_command_and_uuid(
+    tmp_path: Path,
+) -> None:
+    _protocol, config, _artifact = _v7_recovery_artifact_config(tmp_path)
+    output = tmp_path / "results"
+    output.mkdir()
+    uuid = "GPU-test"
+    environment_hash = "a" * 64
+    context = {
+        "device": "cuda:0",
+        "device_uuid": uuid,
+        "training_environment_sha256": environment_hash,
+    }
+    events = [
+        {"event": "run_context_validated", "run_id": config.runtime.run_id, "context": context},
+        {
+            "event": "run_started",
+            "run_id": config.runtime.run_id,
+            "command": ["python", "-m", "talif_msresnet.train", "--device", "cuda:0"],
+        },
+    ]
+    (output / "matrix_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8"
+    )
+    bound = {
+        "health": {
+            "environment": {
+                "training_environment_sha256": environment_hash,
+                "gpu_idle_precheck": {"device_uuid": uuid},
+            }
+        }
+    }
+
+    assert validator._matrix_recovery_launch_failures(
+        output, expected_run_ids={config.runtime.run_id}, bound=bound
+    ) == []
+
+    events[1]["command"][-1] = "cuda:1"
+    (output / "matrix_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8"
+    )
+    failures = validator._matrix_recovery_launch_failures(
+        output, expected_run_ids={config.runtime.run_id}, bound=bound
+    )
+    assert any("--device cuda:0" in failure for failure in failures)

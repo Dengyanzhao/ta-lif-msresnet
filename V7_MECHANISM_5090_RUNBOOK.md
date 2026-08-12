@@ -401,7 +401,12 @@ set -o pipefail
   cd /hy-tmp/ta-lif-msresnet
   PYTHON=/root/venvs/talif-msresnet/bin/python
   export CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8
-  test "$(cat /hy-tmp/v7-pilot.exit)" = 0
+  if test -s /hy-tmp/v7-pilot-device-recovery.exit && \
+     test "$(cat /hy-tmp/v7-pilot-device-recovery.exit)" = 0; then
+    test -s results/pilot/v7_mechanism/validation_device_recovery.json
+  else
+    test "$(cat /hy-tmp/v7-pilot.exit)" = 0
+  fi
   COMMIT=$(git rev-parse HEAD)
   "$PYTHON" scripts/create_freeze_manifest.py \
     --protocol configs/protocol_v7_mechanism.yaml \
@@ -417,6 +422,41 @@ echo "V7_FORMAL_FREEZE_EXIT=$rc"
 ```
 
 三步都必须 PASS，且必须看到 `V7_FORMAL_FREEZE_EXIT=0`；不要修改 protocol、signoff 或矩阵文件。
+
+### D3R. 已完成六条件 pilot 的设备执行等价恢复
+
+本节只适用于这一次已完成全部六个 run、原始
+`results/pilot/v7_mechanism/validation.json` 的 SHA-256 为
+`90c90f1b23146f714b5ac72ba35b736f8208f5cd20238c3ff6ebf4c7ea23d77f`、且唯一
+完整性问题是冻结 `runtime.device=auto` 与历史执行记录 `cuda:0` 不一致的事故。
+绝不重跑 health、pilot 或验证链；绝不修改原始 `validation.json`、checkpoint、manifest
+或训练日志。此命令只创建不可报告的恢复侧车文件，侧车本身不得进入论文结果。
+
+```bash
+set +e
+set -o pipefail
+(
+  set -euo pipefail
+  cd /hy-tmp/ta-lif-msresnet
+  PYTHON=/root/venvs/talif-msresnet/bin/python
+  export CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8
+  test "$(cat /hy-tmp/v7-pilot.exit)" = 2
+  test ! -e results/pilot/v7_mechanism/validation_device_recovery.json
+  "$PYTHON" scripts/validate_v7_pilot.py \
+    --protocol configs/protocol_v7_mechanism.yaml \
+    --config-dir configs/v7_mechanism_pilot_generated \
+    --recover-device-execution-equivalence results/pilot/v7_mechanism/validation.json \
+    --output results/pilot/v7_mechanism/validation_device_recovery.json
+) 2>&1 | tee /hy-tmp/v7-pilot-device-recovery.log
+rc=${PIPESTATUS[0]}
+printf '%s\n' "$rc" > /hy-tmp/v7-pilot-device-recovery.exit
+echo "V7_PILOT_DEVICE_RECOVERY_EXIT=$rc"
+```
+
+仅当输出同时包含 `V7_PILOT_VALIDATION_DEVICE_RECOVERY_PASS`、
+`NON_REPORTING_OUTPUT=.../validation_device_recovery.json` 和
+`V7_PILOT_DEVICE_RECOVERY_EXIT=0` 时，才可继续执行 **D3 Formal freeze**。保留原始
+validation 文件和该侧车；两者均为审计材料，不是论文结果。
 
 ### D4. 48 个正式 run
 
@@ -434,7 +474,7 @@ set -o pipefail
   test "$(cat /hy-tmp/v7-freeze.exit)" = 0
   "$PYTHON" scripts/run_matrix.py \
     --protocol configs/protocol_v7_mechanism.yaml \
-    --device cuda:0 --stop-on-error
+    --stop-on-error
 ) 2>&1 | tee /hy-tmp/v7-formal.log
 rc=${PIPESTATUS[0]}
 printf '%s\n' "$rc" > /hy-tmp/v7-formal.exit
@@ -464,7 +504,7 @@ set -o pipefail
   test "$(cat /hy-tmp/v7-freeze.exit)" = 0
   "$PYTHON" scripts/run_matrix.py \
     --protocol configs/protocol_v7_mechanism.yaml \
-    --device cuda:0 --resume-matrix --stop-on-error
+    --resume-matrix --stop-on-error
 ) 2>&1 | tee -a /hy-tmp/v7-formal.log
 rc=${PIPESTATUS[0]}
 printf '%s\n' "$rc" > /hy-tmp/v7-formal.exit

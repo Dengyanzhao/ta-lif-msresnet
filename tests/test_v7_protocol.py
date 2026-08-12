@@ -182,6 +182,62 @@ def test_v7_artifact_path_canonicalizer_rejects_non_equivalent_path(
         canonicalize_v7_artifact_run_mapping(wrong, protocol, project_root=ROOT)
 
 
+def test_v7_artifact_device_canonicalizer_accepts_only_reviewed_cuda_zero_override() -> None:
+    protocol = _protocol()
+    raw = generate_run_matrix(protocol)[0]
+    artifact = copy.deepcopy(raw)
+    artifact["runtime"]["device"] = "cuda:0"
+
+    with pytest.raises(ConfigError, match="runtime.device"):
+        canonicalize_v7_artifact_run_mapping(
+            artifact,
+            protocol,
+            project_root=ROOT,
+        )
+
+    normalized = canonicalize_v7_artifact_run_mapping(
+        artifact,
+        protocol,
+        project_root=ROOT,
+        expected_execution_device="cuda:0",
+    )
+
+    assert artifact["runtime"]["device"] == "cuda:0"
+    assert normalized["runtime"]["device"] == "auto"
+    assert validate_v7_run_mapping(normalized, protocol).runtime.device == "auto"
+
+
+@pytest.mark.parametrize("device", ("cuda", "cuda:1", "cpu", "auto"))
+def test_v7_artifact_device_canonicalizer_rejects_any_nonreviewed_device(
+    device: str,
+) -> None:
+    protocol = _protocol()
+    artifact = copy.deepcopy(generate_run_matrix(protocol)[0])
+    artifact["runtime"]["device"] = device
+
+    with pytest.raises(ConfigError, match="reviewed execution device"):
+        canonicalize_v7_artifact_run_mapping(
+            artifact,
+            protocol,
+            project_root=ROOT,
+            expected_execution_device="cuda:0",
+        )
+
+
+def test_v7_artifact_device_canonicalizer_rejects_unapproved_normalization_request() -> None:
+    protocol = _protocol()
+    artifact = copy.deepcopy(generate_run_matrix(protocol)[0])
+    artifact["runtime"]["device"] = "cuda:1"
+
+    with pytest.raises(ConfigError, match="only permits"):
+        canonicalize_v7_artifact_run_mapping(
+            artifact,
+            protocol,
+            project_root=ROOT,
+            expected_execution_device="cuda:1",
+        )
+
+
 def test_v7_health_and_pilot_paths_are_isolated_and_seed_bound() -> None:
     acceptance = _protocol()["pilot_acceptance"]
 

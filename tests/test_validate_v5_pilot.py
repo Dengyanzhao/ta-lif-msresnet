@@ -380,6 +380,74 @@ def test_v5_checkpoint_embedded_config_uses_the_same_path_normalization(
     assert checkpoint["config"]["runtime"]["output_dir"] == str(actual_output)
 
 
+def test_checkpoint_embedded_config_applies_optional_artifact_normalizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_best = {"accuracy": 0.5, "loss": 1.0, "epoch": 0}
+    expected_hash = "config-hash"
+    expected_environment = "e" * 64
+    expected_output = "results/pilot/v7_mechanism/cifar100_s1"
+    actual_output = tmp_path / expected_output
+    checkpoint = {
+        "model_state": {"weight": object()},
+        "optimizer_state": {"state": {}, "param_groups": []},
+        "scheduler_state": {"last_epoch": 0},
+        "config_hash": expected_hash,
+        "training_environment_sha256": expected_environment,
+        "epoch": 0,
+        "best_val": expected_best,
+        "train_history": [],
+        "config": {
+            "runtime": {
+                "output_dir": str(actual_output),
+                "device": "cuda:0",
+            }
+        },
+    }
+    normalized_inputs: list[dict[str, Any]] = []
+    validated_inputs: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        validator.common,
+        "load_checkpoint",
+        lambda *_args, **_kwargs: checkpoint,
+    )
+
+    def normalizer(raw: dict[str, Any]) -> dict[str, Any]:
+        normalized_inputs.append(raw)
+        assert raw["runtime"]["output_dir"] == expected_output
+        result = {**raw, "runtime": {**raw["runtime"], "device": "auto"}}
+        return result
+
+    def validate(raw: dict[str, Any], _protocol: dict[str, Any]) -> Any:
+        validated_inputs.append(raw)
+        return SimpleNamespace(config_hash=expected_hash)
+
+    monkeypatch.setattr(validator.common, "validate_run_mapping", validate)
+
+    failures = validator.common._checkpoint_failures(
+        tmp_path / "checkpoint.pt",
+        label="checkpoint.pt",
+        expected_epoch=0,
+        expected_best=expected_best,
+        expected_history=[],
+        expected_config_hash=expected_hash,
+        expected_environment_hash=expected_environment,
+        protocol={},
+        expected_output_dir=expected_output,
+        actual_output_root=actual_output,
+        artifact_config_normalizer=normalizer,
+    )
+
+    assert failures == []
+    assert normalized_inputs[0]["runtime"]["device"] == "cuda:0"
+    assert validated_inputs[0]["runtime"]["device"] == "auto"
+    assert checkpoint["config"]["runtime"] == {
+        "output_dir": str(actual_output),
+        "device": "cuda:0",
+    }
+
+
 def _epoch_events(
     *,
     late_accuracy: float = 0.31,

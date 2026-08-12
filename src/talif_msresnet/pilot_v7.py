@@ -98,6 +98,44 @@ V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS: tuple[str, ...] = (
     "tests/test_v7_health_gate.py",
     "tests/test_validate_v7_pilot.py",
 )
+V7_HEALTH_RECOVERY_SEAL_COMMIT = "9786dd748f95c79dca269b1eb4e45826c62c655d"
+V7_PILOT_DEVICE_RECOVERY_SCHEMA = (
+    "ta-lif-msresnet-v7-pilot-validation-device-compatibility-recovery-release-v1"
+)
+V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD = (
+    "V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY_RELEASE.json"
+)
+V7_PILOT_DEVICE_RECOVERY_OUTPUT = (
+    "results/pilot/v7_mechanism/validation_device_recovery.json"
+)
+V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION = (
+    "results/pilot/v7_mechanism/validation.json"
+)
+V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256 = (
+    "90c90f1b23146f714b5ac72ba35b736f8208f5cd20238c3ff6ebf4c7ea23d77f"
+)
+V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH = (
+    "ce8240e28147a87ee76a3953f8097613ecc33d683339ad66d9e73a126104265c"
+)
+V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE = "auto"
+V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE = "cuda:0"
+V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS: tuple[str, ...] = (
+    "V7_MECHANISM_5090_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/run_matrix.py",
+    "scripts/validate_v3_pilot.py",
+    "scripts/validate_v7_pilot.py",
+    "scripts/validate_v7_source_release.py",
+    "src/talif_msresnet/config_v7.py",
+    "src/talif_msresnet/freeze.py",
+    "src/talif_msresnet/pilot_v7.py",
+    "tests/test_v7_freeze_gates.py",
+    "tests/test_v7_health_gate.py",
+    "tests/test_v7_orchestration.py",
+    "tests/test_v7_protocol.py",
+    "tests/test_validate_v5_pilot.py",
+    "tests/test_validate_v7_pilot.py",
+)
 SIGNED_STATUS = (
     "Status: **AUTHORIZED - ACCOUNTABLE AUTHOR/USER APPROVAL RECORDED; "
     "PROTOCOL FROZEN**"
@@ -208,6 +246,27 @@ def _git_bytes(repository_root: Path, *arguments: str) -> bytes:
             f"(git {' '.join(arguments)}): {detail or 'no details'}"
         )
     return completed.stdout
+
+
+def _git_blob_id(repository_root: Path, revision: str, relative_path: str) -> str:
+    """Return a committed blob id without consulting text checkout filters."""
+    return _git_output(repository_root, "rev-parse", f"{revision}:{relative_path}")
+
+
+def _git_is_ancestor(repository_root: Path, ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode in (0, 1):
+        return completed.returncode == 0
+    detail = completed.stderr.decode("utf-8", errors="replace").strip()
+    raise PilotV7Error(
+        "Cannot inspect the V7 recovery ancestry "
+        f"({ancestor} -> {descendant}): {detail or 'no details'}"
+    )
 
 
 def _require_full_commit(value: Any, label: str) -> str:
@@ -482,15 +541,18 @@ def validate_health_recovery_release(
     """
 
     root = Path(repository_root).resolve()
-    recovery_commit = _require_full_commit(
-        _git_output(root, "rev-parse", "HEAD"), "V7 recovery release commit"
+    current_head = _require_full_commit(
+        _git_output(root, "rev-parse", "HEAD"), "V7 current Git commit"
     )
+    recovery_commit = V7_HEALTH_RECOVERY_SEAL_COMMIT
     record_path = root / V7_HEALTH_RECOVERY_RELEASE_RECORD
     record = _read_json(record_path, "V7 health recovery release record")
     implementation_commit = _require_full_commit(
         record.get("implementation_commit"), "V7 recovery implementation commit"
     )
 
+    if not _git_is_ancestor(root, recovery_commit, current_head):
+        raise PilotV7Error("V7 health recovery seal is not an ancestor of the current commit")
     seal_parents = _git_output(
         root, "rev-list", "--parents", "-n", "1", recovery_commit
     ).split()
@@ -552,9 +614,7 @@ def validate_health_recovery_release(
             "V7 health recovery seal must add only the release record"
         )
 
-    implementation_tree = _git_output(
-        root, "rev-parse", f"{implementation_commit}^{{tree}}"
-    )
+    implementation_tree = _git_output(root, "rev-parse", f"{implementation_commit}^{{tree}}")
     expected_record = {
         "schema": V7_HEALTH_RECOVERY_SCHEMA,
         "base_health_commit": V7_HEALTH_RECOVERY_BASE_COMMIT,
@@ -683,6 +743,179 @@ def validate_health_recovery_release(
     }
 
 
+def validate_pilot_device_recovery_release(
+    repository_root: str | Path,
+) -> dict[str, Any]:
+    """Validate the record-only second seal for the V7 device equivalence fix."""
+
+    root = Path(repository_root).resolve()
+    current_head = _require_full_commit(
+        _git_output(root, "rev-parse", "HEAD"), "V7 current Git commit"
+    )
+    record_path = root / V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD
+    record = _read_json(record_path, "V7 pilot device recovery release record")
+    implementation_commit = _require_full_commit(
+        record.get("implementation_commit"), "V7 device recovery implementation commit"
+    )
+    additions = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "log",
+            "HEAD",
+            "--format=%H",
+            "--diff-filter=A",
+            "--",
+            V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
+        ).splitlines()
+        if line.strip()
+    )
+    if len(additions) != 1:
+        raise PilotV7Error(
+            "V7 device recovery must have exactly one release-record introduction: "
+            f"observed={list(additions)}"
+        )
+    seal_commit = _require_full_commit(
+        additions[0], "V7 device recovery seal commit"
+    )
+    if not _git_is_ancestor(root, seal_commit, current_head):
+        raise PilotV7Error(
+            "V7 device recovery seal is not an ancestor of the current commit"
+        )
+    sealed_record_object = _git_blob_id(
+        root, seal_commit, V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD
+    )
+    current_record_object = _git_blob_id(
+        root, "HEAD", V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD
+    )
+    if current_record_object != sealed_record_object:
+        raise PilotV7Error(
+            "V7 device recovery release record changed after its sealed introduction"
+        )
+    seal_parents = _git_output(
+        root, "rev-list", "--parents", "-n", "1", seal_commit
+    ).split()
+    if seal_parents != [seal_commit, implementation_commit]:
+        raise PilotV7Error(
+            "V7 device recovery seal must be the one-parent direct child of its "
+            "implementation commit"
+        )
+    implementation_parents = _git_output(
+        root, "rev-list", "--parents", "-n", "1", implementation_commit
+    ).split()
+    if implementation_parents != [implementation_commit, V7_HEALTH_RECOVERY_SEAL_COMMIT]:
+        raise PilotV7Error(
+            "V7 device recovery implementation must be the direct child of the "
+            "sealed health compatibility recovery"
+        )
+    if _git_output(root, "status", "--porcelain", "--untracked-files=no"):
+        raise PilotV7Error("V7 device recovery requires a clean tracked Git worktree")
+    implementation_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            V7_HEALTH_RECOVERY_SEAL_COMMIT,
+            implementation_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    expected_changes = tuple(
+        f"M\t{path}" for path in V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS
+    )
+    if implementation_changes != expected_changes:
+        raise PilotV7Error(
+            "V7 device recovery implementation delta is not the exact "
+            f"modification-only allowlist: observed={list(implementation_changes)} "
+            f"expected={list(expected_changes)}"
+        )
+    seal_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            implementation_commit,
+            seal_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    if seal_changes != (f"A\t{V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD}",):
+        raise PilotV7Error("V7 device recovery seal must add only the release record")
+    implementation_tree = _git_output(
+        root, "rev-parse", f"{implementation_commit}^{{tree}}"
+    )
+    expected_record = {
+        "schema": V7_PILOT_DEVICE_RECOVERY_SCHEMA,
+        "base_health_recovery_seal_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "original_validation_path": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+        "original_validation_sha256": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+        "recovery_output_path": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "protocol_hash": V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+        "frozen_runtime_device": V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
+        "accepted_execution_device": V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+        "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+        "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+        "allowed_changed_paths": list(V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS),
+    }
+    mismatches = [
+        key for key, expected in expected_record.items() if record.get(key) != expected
+    ]
+    expected_keys = set(expected_record) | {"implementation_file_sha256", "record_sha256"}
+    if set(record) != expected_keys:
+        mismatches.append("record_keys")
+    implementation_hashes = record.get("implementation_file_sha256")
+    if not isinstance(implementation_hashes, Mapping) or set(implementation_hashes) != set(
+        V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS
+    ):
+        mismatches.append("implementation_file_sha256")
+        implementation_hashes = {}
+    for relative in V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS:
+        committed_sha256 = hashlib.sha256(
+            _git_bytes(root, "show", f"{implementation_commit}:{relative}")
+        ).hexdigest()
+        if implementation_hashes.get(relative) != committed_sha256:
+            mismatches.append(f"implementation_file_sha256.{relative}")
+    record_without_hash = dict(record)
+    record_sha256 = record_without_hash.pop("record_sha256", None)
+    if record_sha256 != stable_hash(record_without_hash):
+        mismatches.append("record_sha256")
+    if mismatches:
+        raise PilotV7Error(
+            "V7 device recovery record is not the sealed reviewed implementation: "
+            + ", ".join(mismatches)
+        )
+    return {
+        "schema": V7_PILOT_DEVICE_RECOVERY_SCHEMA,
+        "base_health_recovery_seal_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "recovery_commit": seal_commit,
+        "original_validation_path": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+        "original_validation_sha256": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+        "recovery_output_path": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "protocol_hash": V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+        "frozen_runtime_device": V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
+        "accepted_execution_device": V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+        "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+        "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+        "allowed_changed_paths": list(V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS),
+        "observed_changes": list(implementation_changes),
+        "implementation_file_sha256": dict(implementation_hashes),
+        "release_record": V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
+        "record_sha256": str(record["record_sha256"]),
+        "release_record_sha256": sha256_file(record_path),
+        "tracked_clean": True,
+    }
+
+
 def _validate_recovered_current_source(
     *,
     repository_root: Path,
@@ -706,6 +939,16 @@ def _validate_recovered_current_source(
         current_runtime
     ) != set(V7_HEALTH_RUNTIME_SOURCE_PATHS):
         raise PilotV7Error("V7 recovered health runtime source set changed")
+    device_recovery: Mapping[str, Any] | None = None
+    if (repository_root / V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD).is_file():
+        device_recovery = validate_pilot_device_recovery_release(repository_root)
+    device_hashes = (
+        device_recovery.get("implementation_file_sha256")
+        if isinstance(device_recovery, Mapping)
+        else {}
+    )
+    if not isinstance(device_hashes, Mapping):
+        raise PilotV7Error("V7 device recovery implementation hashes are malformed")
     for relative in V7_HEALTH_RUNTIME_SOURCE_PATHS:
         base_sha256 = hashlib.sha256(
             _git_bytes(
@@ -718,10 +961,11 @@ def _validate_recovered_current_source(
             raise PilotV7Error(
                 f"V7 consumed health source is not bound to its base commit: {relative}"
             )
-        expected = (
+        expected = device_hashes.get(
+            relative,
             implementation_sha256[relative]
             if relative in implementation_sha256
-            else old_runtime[relative]
+            else old_runtime[relative],
         )
         if current_runtime.get(relative) != expected:
             raise PilotV7Error(

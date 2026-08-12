@@ -755,8 +755,15 @@ def canonicalize_v7_artifact_run_mapping(
     *,
     project_root: str | Path,
     expected_output_dir: str = V7_OUTPUT_ROOT,
+    expected_execution_device: str | None = None,
 ) -> dict[str, Any]:
-    """Normalize only a path-equivalent V7 runtime artifact for revalidation."""
+    """Normalize narrowly approved V7 runtime artifact execution aliases.
+
+    By default, this accepts only the frozen V7 runtime mapping.  A recovery
+    caller may explicitly attest the sole reviewed launch override
+    ``cuda:0``; it is then normalized in memory to the frozen logical device
+    selector ``auto`` before strict run validation.
+    """
 
     validated = validate_v7_protocol(protocol)
     value = copy.deepcopy(dict(_mapping(raw, "V7 runtime artifact run")))
@@ -785,6 +792,20 @@ def canonicalize_v7_artifact_run_mapping(
             f"directory: {observed_value!r} != {expected_output_dir!r}"
         )
     runtime_value["output_dir"] = expected_output_dir
+    if expected_execution_device is not None:
+        frozen_device = V7_RUNTIME_CONTRACT["device"]
+        if expected_execution_device != "cuda:0" or frozen_device != "auto":
+            raise ConfigError(
+                "V7 artifact execution-device normalization only permits "
+                "the reviewed 'cuda:0' -> 'auto' mapping"
+            )
+        observed_device = runtime_value.get("device")
+        if observed_device != expected_execution_device:
+            raise ConfigError(
+                "V7 runtime artifact device is not the reviewed execution "
+                f"device: {observed_device!r} != {expected_execution_device!r}"
+            )
+        runtime_value["device"] = frozen_device
     value["runtime"] = runtime_value
     validate_v7_run_mapping(value, validated)
     return value

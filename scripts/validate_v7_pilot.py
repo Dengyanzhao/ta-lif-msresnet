@@ -32,11 +32,19 @@ from talif_msresnet.config import (
 )
 from talif_msresnet.config_v7 import (
     V7_ACTIVE_CONDITIONS,
+    canonicalize_v7_artifact_run_mapping,
     generate_v7_pilot_matrix,
 )
 from talif_msresnet.pathing import artifact_path_reference
 from talif_msresnet.pilot_v7 import (
     REPORTING_ELIGIBILITY,
+    V7_HEALTH_RECOVERY_SEAL_COMMIT,
+    V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+    V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
+    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+    V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+    V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
     PilotBlock,
     PilotV7Error,
     attempt_receipt_payload,
@@ -47,6 +55,7 @@ from talif_msresnet.pilot_v7 import (
     resolve_pilot_block,
     validate_attempt_receipt,
     validate_health_report,
+    validate_pilot_device_recovery_release,
 )
 from talif_msresnet.utils import (
     load_checkpoint,
@@ -60,6 +69,12 @@ ARTIFACT_CLASS = "NON_REPORTABLE_V7_MECHANISM_PILOT_ACCEPTANCE"
 PASS_DECISION = "ACCEPT_V7_SIX_CONDITION_120_EPOCH_PILOT_RELEASE_FORMAL_FREEZE"
 FAIL_DECISION = "BLOCK_V7_AND_REQUIRE_NEW_PROTOCOL_AND_UNUSED_PILOT_SEED"
 INVALID_DECISION = "BLOCK_V7_AND_INVESTIGATE_PILOT_EVIDENCE_INTEGRITY"
+DEVICE_RECOVERY_ARTIFACT_CLASS = (
+    "NON_REPORTABLE_V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY"
+)
+DEVICE_RECOVERY_DECISION = (
+    "RECOVER_V7_PILOT_PASS_AFTER_DEVICE_EXECUTION_EQUIVALENCE_FIX"
+)
 ADAPTIVE_CONDITIONS = frozenset({"M2", "M3", "M4", "PLIF"})
 TEST_FIELDS = (
     "test_loss",
@@ -72,6 +87,12 @@ TEST_FIELDS = (
 
 class PilotValidationError(RuntimeError):
     """Raised when the validator cannot establish the V7 pilot contract."""
+
+
+def _report_without_timestamp(report: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(report)
+    normalized.pop("validated_at", None)
+    return normalized
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -553,16 +574,252 @@ def _threshold_summary(
     )
 
 
+def _recovery_config_identity(
+    raw: Any,
+    *,
+    label: str,
+    protocol: Mapping[str, Any],
+    repository_root: Path,
+    expected_config: RunConfig,
+) -> tuple[str | None, list[str]]:
+    """Prove one raw execution config differs only by the reviewed aliases."""
+
+    failures: list[str] = []
+    if not isinstance(raw, Mapping):
+        return None, [f"{label} config is not a mapping"]
+    runtime = raw.get("runtime")
+    if not isinstance(runtime, Mapping):
+        return None, [f"{label} config has no runtime mapping"]
+    if runtime.get("device") != V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE:
+        failures.append(
+            f"{label} runtime.device is not the reviewed execution device "
+            f"{V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE!r}"
+        )
+    raw_execution_hash = stable_hash(raw)
+    try:
+        normalized_raw = canonicalize_v7_artifact_run_mapping(
+            raw,
+            protocol,
+            project_root=repository_root,
+            expected_output_dir=expected_config.runtime.output_dir,
+            expected_execution_device=V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+        )
+        normalized = validate_run_mapping(normalized_raw, protocol)
+    except Exception as exc:  # noqa: BLE001 - record artifact-integrity failure.
+        failures.append(
+            f"{label} config cannot be normalized by the reviewed device/path "
+            f"equivalence: {type(exc).__name__}: {exc}"
+        )
+        return raw_execution_hash, failures
+    if normalized.as_dict() != expected_config.as_dict():
+        failures.append(f"{label} normalized config differs from the frozen run")
+    if normalized.execution_hash != expected_config.execution_hash:
+        failures.append(
+            f"{label} normalized execution hash differs from the frozen run"
+        )
+    if normalized.config_hash != expected_config.config_hash:
+        failures.append(f"{label} normalized scientific hash differs from the frozen run")
+    return raw_execution_hash, failures
+
+
+def _stored_recovery_execution_identity_failures(
+    raw: Any,
+    stored_execution_hash: Any,
+    *,
+    label: str,
+    protocol: Mapping[str, Any],
+    repository_root: Path,
+    expected_config: RunConfig,
+    reference_raw: Mapping[str, Any],
+    reference_execution_hash: str,
+) -> list[str]:
+    """Bind a manifest/checkpoint config and hash to the raw resolved config."""
+
+    raw_execution_hash, failures = _recovery_config_identity(
+        raw,
+        label=label,
+        protocol=protocol,
+        repository_root=repository_root,
+        expected_config=expected_config,
+    )
+    if raw != reference_raw:
+        failures.append(f"{label} raw config differs from resolved_config.json")
+    if stored_execution_hash != raw_execution_hash:
+        failures.append(f"{label} execution_hash does not hash its raw config")
+    if stored_execution_hash != reference_execution_hash:
+        failures.append(
+            f"{label} execution_hash differs from resolved_config.json identity"
+        )
+    return failures
+
+
+def _checkpoint_recovery_execution_identity_failures(
+    path: Path,
+    *,
+    label: str,
+    protocol: Mapping[str, Any],
+    repository_root: Path,
+    expected_config: RunConfig,
+    reference_raw: Mapping[str, Any],
+    reference_execution_hash: str,
+) -> list[str]:
+    try:
+        checkpoint = load_checkpoint(path, map_location="cpu")
+    except Exception as exc:  # noqa: BLE001 - record artifact-integrity failure.
+        return [
+            (
+                f"{label} cannot be loaded for execution-identity audit: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        ]
+    return _stored_recovery_execution_identity_failures(
+        checkpoint.get("config"),
+        checkpoint.get("execution_hash"),
+        label=label,
+        protocol=protocol,
+        repository_root=repository_root,
+        expected_config=expected_config,
+        reference_raw=reference_raw,
+        reference_execution_hash=reference_execution_hash,
+    )
+
+
+def _trainer_recovery_launch_failures(
+    events: Sequence[Mapping[str, Any]], *, expected_config: RunConfig
+) -> list[str]:
+    starts = [event for event in events if event.get("event") == "run_started"]
+    if len(starts) != 1:
+        return [
+            (
+                "trainer event stream must contain exactly one run_started event for "
+                "device recovery"
+            )
+        ]
+    start = starts[0]
+    failures: list[str] = []
+    if start.get("device") != V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE:
+        failures.append(
+            "trainer run_started device is not the reviewed execution device "
+            f"{V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE!r}"
+        )
+    if start.get("dry_run") is not False:
+        failures.append("trainer run_started does not prove a non-dry-run execution")
+    if start.get("config_hash") != expected_config.config_hash:
+        failures.append("trainer run_started scientific config hash mismatch")
+    return failures
+
+
+def _matrix_recovery_launch_failures(
+    output_root: Path,
+    *,
+    expected_run_ids: set[str],
+    bound: Mapping[str, Any],
+) -> list[str]:
+    """Prove each matrix launch used the single reviewed CUDA selector."""
+
+    path = output_root / "matrix_events.jsonl"
+    if not path.is_file():
+        return ["device recovery requires matrix_events.jsonl"]
+    try:
+        events = common._read_events(path)
+    except common.PilotValidationError as exc:
+        return [f"cannot read matrix_events.jsonl for device recovery: {exc}"]
+    health = bound.get("health")
+    health_environment = health.get("environment") if isinstance(health, Mapping) else None
+    idle = (
+        health_environment.get("gpu_idle_precheck")
+        if isinstance(health_environment, Mapping)
+        else None
+    )
+    expected_uuid = idle.get("device_uuid") if isinstance(idle, Mapping) else None
+    expected_environment_hash = (
+        health_environment.get("training_environment_sha256")
+        if isinstance(health_environment, Mapping)
+        else None
+    )
+    failures: list[str] = []
+    if not isinstance(expected_uuid, str) or not expected_uuid:
+        failures.append("bound health report has no CUDA device UUID")
+    for run_id in sorted(expected_run_ids):
+        indexed = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("run_id") == run_id
+        ]
+        starts = [
+            (index, event)
+            for index, event in indexed
+            if event.get("event") == "run_started"
+        ]
+        if len(starts) != 1:
+            failures.append(
+                f"{run_id}: matrix event stream must contain exactly one run_started event"
+            )
+            continue
+        start_index, start = starts[0]
+        command = start.get("command")
+        if not isinstance(command, list) or not all(
+            isinstance(value, str) for value in command
+        ):
+            failures.append(f"{run_id}: matrix run_started command is malformed")
+        else:
+            device_positions = [
+                index for index, value in enumerate(command) if value == "--device"
+            ]
+            combined_devices = [
+                value for value in command if value.startswith("--device=")
+            ]
+            exact_device_pair = bool(
+                len(device_positions) == 1
+                and device_positions[0] + 1 < len(command)
+                and command[device_positions[0] + 1]
+                == V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE
+                and not combined_devices
+            )
+            if not exact_device_pair:
+                failures.append(
+                    f"{run_id}: matrix command does not contain exactly "
+                    f"--device {V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE}"
+                )
+        contexts = [
+            (index, event)
+            for index, event in indexed
+            if event.get("event") == "run_context_validated"
+        ]
+        if len(contexts) != 1:
+            failures.append(
+                f"{run_id}: matrix event stream must contain exactly one "
+                "run_context_validated event"
+            )
+            continue
+        context_index, context_event = contexts[0]
+        context = context_event.get("context")
+        if context_index >= start_index:
+            failures.append(f"{run_id}: matrix runtime context was not validated before launch")
+        if not isinstance(context, Mapping):
+            failures.append(f"{run_id}: matrix runtime context is malformed")
+            continue
+        if context.get("device_uuid") != expected_uuid:
+            failures.append(f"{run_id}: matrix runtime context CUDA UUID mismatch")
+        if context.get("training_environment_sha256") != expected_environment_hash:
+            failures.append(f"{run_id}: matrix runtime context environment hash mismatch")
+        if context.get("device") != V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE:
+            failures.append(f"{run_id}: matrix runtime context device mismatch")
+    return failures
+
+
 def _validate_run(
     *,
     protocol: Mapping[str, Any],
     protocol_path: Path,
     config_dir: Path,
+    repository_root: Path,
     block: PilotBlock,
     row: Mapping[str, Any],
     expected_config: RunConfig,
     bound: Mapping[str, Any],
     pilot_contract: Mapping[str, Any],
+    allow_device_execution_equivalence: bool = False,
 ) -> tuple[dict[str, Any], str | None, str | None, str | None]:
     condition = expected_config.model.condition
     run_id = expected_config.runtime.run_id
@@ -607,12 +864,22 @@ def _validate_run(
         planned = load_run_config(config_path, protocol_path)
         metrics = _read_json(run_dir / "seed_metrics.json", "seed metrics")
         run_manifest = _read_json(run_dir / "run_manifest.json", "run manifest")
-        resolved_raw = _read_json(run_dir / "resolved_config.json", "resolved configuration")
+        resolved_artifact_raw = _read_json(
+            run_dir / "resolved_config.json", "resolved configuration"
+        )
         resolved_raw = common._canonicalize_execution_output_dir(
-            resolved_raw,
+            resolved_artifact_raw,
             expected_output_dir=expected_config.runtime.output_dir,
             actual_output_root=block.pilot_output_root,
         )
+        if allow_device_execution_equivalence:
+            resolved_raw = canonicalize_v7_artifact_run_mapping(
+                resolved_raw,
+                protocol,
+                project_root=repository_root,
+                expected_output_dir=expected_config.runtime.output_dir,
+                expected_execution_device=V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+            )
         resolved = validate_run_mapping(resolved_raw, protocol)
         events = common._read_events(run_dir / "events.jsonl")
     except (ValueError, PilotValidationError, common.PilotValidationError) as exc:
@@ -635,6 +902,35 @@ def _validate_run(
         integrity.append("matrix row config_hash differs from expected")
     if planned.config_hash != expected_hash or resolved.config_hash != expected_hash:
         integrity.append("planned/resolved scientific config hash mismatch")
+    if allow_device_execution_equivalence:
+        resolved_execution_hash, recovery_identity_failures = _recovery_config_identity(
+            resolved_artifact_raw,
+            label="resolved_config.json",
+            protocol=protocol,
+            repository_root=repository_root,
+            expected_config=expected_config,
+        )
+        integrity.extend(recovery_identity_failures)
+        if resolved_execution_hash is None:
+            integrity.append(
+                "resolved_config.json has no recoverable raw execution identity"
+            )
+        else:
+            integrity.extend(
+                _stored_recovery_execution_identity_failures(
+                    run_manifest.get("config"),
+                    run_manifest.get("execution_hash"),
+                    label="run_manifest.json",
+                    protocol=protocol,
+                    repository_root=repository_root,
+                    expected_config=expected_config,
+                    reference_raw=resolved_artifact_raw,
+                    reference_execution_hash=resolved_execution_hash,
+                )
+            )
+        integrity.extend(
+            _trainer_recovery_launch_failures(events, expected_config=expected_config)
+        )
     checks = {
         "metrics.run_id": (metrics.get("run_id"), run_id),
         "metrics.condition": (metrics.get("condition"), condition),
@@ -825,6 +1121,19 @@ def _validate_run(
                     protocol=protocol,
                     expected_output_dir=expected_config.runtime.output_dir,
                     actual_output_root=block.pilot_output_root,
+                    artifact_config_normalizer=(
+                        lambda raw: canonicalize_v7_artifact_run_mapping(
+                            raw,
+                            protocol,
+                            project_root=repository_root,
+                            expected_output_dir=expected_config.runtime.output_dir,
+                            expected_execution_device=(
+                                V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE
+                            ),
+                        )
+                        if allow_device_execution_equivalence
+                        else None
+                    ),
                 )
             )
             integrity.extend(
@@ -835,6 +1144,21 @@ def _validate_run(
                     adaptive_names=adaptive_names,
                 )
             )
+            if (
+                allow_device_execution_equivalence
+                and resolved_execution_hash is not None
+            ):
+                integrity.extend(
+                    _checkpoint_recovery_execution_identity_failures(
+                        checkpoint_path,
+                        label=checkpoint_name,
+                        protocol=protocol,
+                        repository_root=repository_root,
+                        expected_config=expected_config,
+                        reference_raw=resolved_artifact_raw,
+                        reference_execution_hash=resolved_execution_hash,
+                    )
+                )
     return (
         {
             "run_id": run_id,
@@ -876,6 +1200,7 @@ def validate_pilot(
     protocol_path: str | Path,
     config_dir: str | Path,
     repository_root: str | Path = PROJECT_ROOT,
+    allow_device_execution_equivalence: bool = False,
 ) -> dict[str, Any]:
     """Validate the complete V7 pilot and return one fail-closed verdict."""
 
@@ -940,6 +1265,14 @@ def validate_pilot(
     else:
         observed_run_ids = set()
         integrity.append(f"pilot results root is missing: {block.pilot_output_root}")
+    if allow_device_execution_equivalence:
+        integrity.extend(
+            _matrix_recovery_launch_failures(
+                block.pilot_output_root,
+                expected_run_ids=expected_run_ids,
+                bound=bound,
+            )
+        )
     unexpected_final_tests = list(block.pilot_output_root.glob("**/final_test.json"))
     if unexpected_final_tests:
         integrity.append("pilot output contains forbidden final_test.json artifacts")
@@ -959,11 +1292,13 @@ def validate_pilot(
             protocol=protocol,
             protocol_path=protocol_path,
             config_dir=config_dir,
+            repository_root=root,
             block=block,
             row=row,
             expected_config=config,
             bound=bound,
             pilot_contract=pilot_contract,
+            allow_device_execution_equivalence=allow_device_execution_equivalence,
         )
         runs[condition] = report
         integrity.extend(f"{condition}: {failure}" for failure in report["integrity_failures"])
@@ -1058,6 +1393,92 @@ def validate_pilot(
     return report
 
 
+def _device_recovery_release_binding(repository_root: Path) -> dict[str, Any]:
+    """Bind the second, record-only seal without weakening the health seal."""
+    try:
+        return validate_pilot_device_recovery_release(repository_root)
+    except PilotV7Error as exc:
+        raise PilotValidationError(str(exc)) from exc
+
+
+def _device_recovery_report(
+    *,
+    recovered: Mapping[str, Any],
+    legacy: Mapping[str, Any],
+    original_path: Path,
+    original: Mapping[str, Any],
+    output: Path,
+    repository_root: Path,
+) -> dict[str, Any]:
+    """Build the non-reportable sidecar after exact legacy reproduction."""
+
+    if sha256_file(original_path) != V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256:
+        raise PilotValidationError(
+            "Canonical INVALID SHA-256 is not the authorized V7 device incident"
+        )
+    if original.get("status") != "INVALID" or original.get("pass") is not False:
+        raise PilotValidationError("Original V7 pilot validation is not the canonical INVALID")
+    if original.get("decision") != INVALID_DECISION:
+        raise PilotValidationError("Original V7 pilot validation has an unexpected decision")
+    if original.get("threshold_failures") != []:
+        raise PilotValidationError("Original INVALID contains threshold failures")
+    if _report_without_timestamp(original) != _report_without_timestamp(legacy):
+        raise PilotValidationError(
+            "Legacy validation does not exactly reproduce the canonical INVALID"
+        )
+    expected_failures = [
+        f"{condition}: v7 run runtime.device must be frozen as "
+        f"{V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE!r}, got "
+        f"{V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE!r}"
+        for condition in V7_ACTIVE_CONDITIONS
+    ]
+    if list(original.get("integrity_failures", ()))[: len(expected_failures)] != expected_failures:
+        raise PilotValidationError("Original INVALID does not contain the authorized device mismatch")
+    if recovered.get("status") != "PASS" or recovered.get("pass") is not True:
+        raise PilotValidationError("Device recovery audit did not establish an aggregate PASS")
+    if recovered.get("protocol_hash") != V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH:
+        raise PilotValidationError("Recovered validation has the wrong frozen protocol hash")
+    if recovered.get("training_environment_sha256") is None:
+        raise PilotValidationError("Recovered validation has no shared training environment")
+    release = _device_recovery_release_binding(repository_root)
+    health = recovered.get("health_compatibility_recovery")
+    if not isinstance(health, Mapping):
+        raise PilotValidationError("Recovered validation has no sealed health recovery binding")
+    if health.get("recovery_commit") != V7_HEALTH_RECOVERY_SEAL_COMMIT:
+        raise PilotValidationError("Recovered validation is not bound to the fixed health seal")
+    return {
+        "schema_version": 1,
+        "artifact_class": DEVICE_RECOVERY_ARTIFACT_CLASS,
+        "reporting_eligibility": REPORTING_ELIGIBILITY,
+        "confirmatory_analysis_eligibility": False,
+        "status": "PASS",
+        "pass": True,
+        "decision": DEVICE_RECOVERY_DECISION,
+        "exit_code": 0,
+        "validated_at": recovered.get("validated_at"),
+        "protocol_hash": recovered.get("protocol_hash"),
+        "acceptance_hash": recovered.get("acceptance_hash"),
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "recovery_validator_commit": release["recovery_commit"],
+        "release_delta": release,
+        "recovery_validator": {
+            "path": artifact_path_reference(Path(__file__).resolve(), repository_root),
+            "sha256": sha256_file(Path(__file__).resolve()),
+        },
+        "original_validation": {
+            "path": artifact_path_reference(original_path, repository_root),
+            "sha256": sha256_file(original_path),
+            "status": "INVALID",
+            "decision": original.get("decision"),
+            "legacy_reproduction": "EXACT_EXCEPT_VALIDATED_AT",
+            "legacy_reproduction_sha256": stable_hash(_report_without_timestamp(legacy)),
+        },
+        "health_compatibility_recovery": dict(health),
+        "recovered_validation": dict(recovered),
+        "output": artifact_path_reference(output, repository_root),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1067,6 +1488,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config-dir", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--recover-device-execution-equivalence",
+        type=Path,
+        help=(
+            "Write the one fixed V7 sidecar recovery beside the immutable canonical "
+            "INVALID; requires --output"
+        ),
+    )
     return parser
 
 
@@ -1078,11 +1507,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         acceptance = protocol.get("pilot_acceptance")
         if not isinstance(acceptance, Mapping):
             raise PilotValidationError("Protocol has no pilot_acceptance mapping")
-        output = (PROJECT_ROOT / str(acceptance["validation_output"])).resolve()
-        if args.output is not None and args.output.resolve() != output:
-            raise PilotValidationError(
-                "--output cannot override pilot_acceptance.validation_output"
-            )
+        canonical_output = (PROJECT_ROOT / str(acceptance["validation_output"])).resolve()
+        recovery_mode = args.recover_device_execution_equivalence is not None
+        if recovery_mode:
+            invalid_path = args.recover_device_execution_equivalence.resolve()
+            expected_invalid = (PROJECT_ROOT / V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION).resolve()
+            if canonical_output != expected_invalid or invalid_path != canonical_output:
+                raise PilotValidationError(
+                    "--recover-device-execution-equivalence must name the canonical "
+                    "V7 validation output"
+                )
+            if args.output is None:
+                raise PilotValidationError("V7 device recovery requires --output")
+            output = args.output.resolve()
+            expected_output = (PROJECT_ROOT / V7_PILOT_DEVICE_RECOVERY_OUTPUT).resolve()
+            if output != expected_output:
+                raise PilotValidationError(
+                    "V7 device recovery output must be the fixed adjacent "
+                    "validation_device_recovery.json artifact"
+                )
+        else:
+            output = canonical_output
+            if args.output is not None and args.output.resolve() != output:
+                raise PilotValidationError(
+                    "--output cannot override pilot_acceptance.validation_output"
+                )
         if output.exists():
             raise PilotValidationError(
                 "V7 pilot validation output already exists; refusing overwrite"
@@ -1096,17 +1545,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             protocol_path=protocol_path,
             config_dir=config_dir,
             repository_root=PROJECT_ROOT,
+            allow_device_execution_equivalence=recovery_mode,
         )
-        exclusive_create_json(output, report)
+        if recovery_mode:
+            original = _read_json(invalid_path, "original V7 pilot validation")
+            legacy = validate_pilot(
+                protocol_path=protocol_path,
+                config_dir=config_dir,
+                repository_root=PROJECT_ROOT,
+                allow_device_execution_equivalence=False,
+            )
+            stored = _device_recovery_report(
+                recovered=report,
+                legacy=legacy,
+                original_path=invalid_path,
+                original=original,
+                output=output,
+                repository_root=PROJECT_ROOT,
+            )
+        else:
+            stored = report
+        exclusive_create_json(output, stored)
     except Exception as exc:  # noqa: BLE001 - one fail-closed CLI marker.
         print(
             f"V7_PILOT_VALIDATION_ERROR: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return 2
-    print(f"V7_PILOT_VALIDATION_{report['status']}")
+    marker = (
+        "V7_PILOT_VALIDATION_DEVICE_RECOVERY_PASS"
+        if recovery_mode
+        else f"V7_PILOT_VALIDATION_{report['status']}"
+    )
+    print(marker)
     print(f"NON_REPORTING_OUTPUT={output}")
-    return int(report["exit_code"])
+    return int(stored["exit_code"])
 
 
 if __name__ == "__main__":

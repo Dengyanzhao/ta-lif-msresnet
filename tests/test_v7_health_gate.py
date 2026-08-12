@@ -1262,6 +1262,10 @@ def _sealed_v7_health_recovery_fixture(
     pilot_v7.exclusive_create_json(release_path, release)
     _git(root, "add", "--", pilot_v7.V7_HEALTH_RECOVERY_RELEASE_RECORD)
     _git(root, "commit", "-m", "seal health compatibility recovery")
+    recovery_commit = _git(root, "rev-parse", "HEAD")
+    monkeypatch.setattr(
+        pilot_v7, "V7_HEALTH_RECOVERY_SEAL_COMMIT", recovery_commit
+    )
     return root, health_path, receipt_path, report, receipt
 
 
@@ -1347,7 +1351,7 @@ def test_health_recovery_release_rejects_tampered_sealed_record(
         validate_health_recovery_release(root)
 
 
-def test_health_recovery_release_rejects_commit_after_seal(
+def test_health_recovery_release_accepts_authorized_descendant_after_seal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, _health_path, _receipt_path, _report, _receipt = (
@@ -1355,5 +1359,25 @@ def test_health_recovery_release_rejects_commit_after_seal(
     )
     _git(root, "commit", "--allow-empty", "-m", "unauthorized commit after seal")
 
-    with pytest.raises(pilot_v7.PilotV7Error, match="one-parent seal"):
-        validate_health_recovery_release(root)
+    binding = validate_health_recovery_release(root)
+    assert binding["recovery_commit"] == pilot_v7.V7_HEALTH_RECOVERY_SEAL_COMMIT
+
+
+def test_device_recovery_release_uses_git_object_identity_after_crlf_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Windows text checkout must not invalidate a sealed JSON record."""
+    root = tmp_path / "device-recovery"
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.name", "V7 Recovery Test")
+    _git(root, "config", "user.email", "v7-recovery@example.invalid")
+    record = root / pilot_v7.V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD
+    record.write_bytes(b'{"record_sha256":"x"}\n')
+    _git(root, "add", "--", record.name)
+    _git(root, "commit", "-m", "seal device recovery record")
+    seal = _git(root, "rev-parse", "HEAD")
+    record.write_bytes(b'{"record_sha256":"x"}\r\n')
+    assert pilot_v7._git_blob_id(root, seal, record.name) == pilot_v7._git_blob_id(
+        root, "HEAD", record.name
+    )

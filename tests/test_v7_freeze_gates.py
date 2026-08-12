@@ -27,7 +27,17 @@ from talif_msresnet.pilot_v7 import (
     V7_HEALTH_RECOVERY_PROTOCOL_HASH,
     V7_HEALTH_RECOVERY_RELEASE_RECORD,
     V7_HEALTH_RECOVERY_SCHEMA,
+    V7_HEALTH_RECOVERY_SEAL_COMMIT,
     V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
+    V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+    V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
+    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+    V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+    V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+    V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
+    V7_PILOT_DEVICE_RECOVERY_SCHEMA,
 )
 
 
@@ -50,7 +60,7 @@ def _v7_protocol() -> dict[str, Any]:
     return copy.deepcopy(tool.load_protocol(V7_PROTOCOL_PATH))
 
 
-def _v7_recovery(*, recovery_commit: str = "f" * 40) -> dict[str, Any]:
+def _v7_recovery(*, recovery_commit: str = V7_HEALTH_RECOVERY_SEAL_COMMIT) -> dict[str, Any]:
     return {
         "schema": V7_HEALTH_RECOVERY_SCHEMA,
         "base_health_commit": V7_HEALTH_RECOVERY_BASE_COMMIT,
@@ -72,6 +82,36 @@ def _v7_recovery(*, recovery_commit: str = "f" * 40) -> dict[str, Any]:
             path: "9" * 64 for path in V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS
         },
         "release_record": V7_HEALTH_RECOVERY_RELEASE_RECORD,
+        "record_sha256": "c" * 64,
+        "release_record_sha256": "b" * 64,
+        "tracked_clean": True,
+    }
+
+
+def _v7_device_recovery(*, recovery_commit: str = "f" * 40) -> dict[str, Any]:
+    return {
+        "schema": V7_PILOT_DEVICE_RECOVERY_SCHEMA,
+        "base_health_recovery_seal_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "implementation_commit": "d" * 40,
+        "implementation_tree": "a" * 40,
+        "recovery_commit": recovery_commit,
+        "original_validation_path": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+        "original_validation_sha256": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+        "recovery_output_path": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "protocol_hash": V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+        "frozen_runtime_device": V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
+        "accepted_execution_device": V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
+        "health_report_sha256": V7_HEALTH_RECOVERY_HEALTH_SHA256,
+        "attempt_receipt_sha256": V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
+        "allowed_changed_paths": list(V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS),
+        "observed_changes": [
+            f"M\t{path}" for path in V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS
+        ],
+        "implementation_file_sha256": {
+            path: "9" * 64 for path in V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS
+        },
+        "release_record": V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
         "record_sha256": "c" * 64,
         "release_record_sha256": "b" * 64,
         "tracked_clean": True,
@@ -154,13 +194,104 @@ def _v7_pass_report(
     }
 
 
-def _write_fake_v7_validator(project: Path, report: dict[str, Any]) -> Path:
+def _v7_legacy_invalid_report(recovered: dict[str, Any]) -> dict[str, Any]:
+    """Model the immutable pilot verdict before the device-equivalence repair."""
+
+    legacy = copy.deepcopy(recovered)
+    device_failures = [
+        "v7 run runtime.device must be frozen as 'auto', got 'cuda:0'"
+        for _ in V7_ACTIVE_CONDITIONS
+    ]
+    aggregate_failures = [
+        f"{condition}: {failure}"
+        for condition, failure in zip(V7_ACTIVE_CONDITIONS, device_failures)
+    ] + [
+        "training environments are not identical across the six conditions: []",
+        "shared-weight hashes are not identical across the six conditions: []",
+        "split-manifest hashes are not identical across the six conditions: []",
+    ]
+    legacy.update(
+        {
+            "status": "INVALID",
+            "pass": False,
+            "decision": "BLOCK_V7_AND_INVESTIGATE_PILOT_EVIDENCE_INTEGRITY",
+            "exit_code": 2,
+            "training_environment_sha256": None,
+            "integrity_failures": aggregate_failures,
+            "threshold_failures": [],
+        }
+    )
+    dataset = legacy["datasets"]["cifar100"]
+    dataset.update(
+        {
+            "status": "INVALID",
+            "pass": False,
+            "environment_sha256": None,
+            "shared_weight_sha256": None,
+            "split_manifest_sha256": None,
+            "integrity_failures": aggregate_failures,
+            "threshold_failures": [],
+        }
+    )
+    for condition, failure in zip(V7_ACTIVE_CONDITIONS, device_failures):
+        run = dataset["runs"][condition]
+        run["training_environment_sha256"] = None
+        run["integrity_failures"] = [failure]
+        run["threshold_failures"] = []
+    return legacy
+
+
+def _v7_device_recovery_sidecar(
+    recovered: dict[str, Any], legacy: dict[str, Any]
+) -> dict[str, Any]:
+    device_recovery = _v7_device_recovery()
+    return {
+        "schema_version": 1,
+        "artifact_class": (
+            "NON_REPORTABLE_V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY"
+        ),
+        "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
+        "confirmatory_analysis_eligibility": False,
+        "status": "PASS",
+        "pass": True,
+        "decision": "RECOVER_V7_PILOT_PASS_AFTER_DEVICE_EXECUTION_EQUIVALENCE_FIX",
+        "exit_code": 0,
+        "validated_at": recovered["validated_at"],
+        "protocol_hash": recovered["protocol_hash"],
+        "acceptance_hash": recovered["acceptance_hash"],
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "recovery_validator_commit": device_recovery["recovery_commit"],
+        "release_delta": device_recovery,
+        "recovery_validator": {
+            "path": "scripts/validate_v7_pilot.py",
+            "sha256": "a" * 64,
+        },
+        "original_validation": {
+            "path": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+            "sha256": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+            "status": "INVALID",
+            "decision": legacy["decision"],
+            "legacy_reproduction": "EXACT_EXCEPT_VALIDATED_AT",
+            "legacy_reproduction_sha256": "b" * 64,
+        },
+        "health_compatibility_recovery": recovered[
+            "health_compatibility_recovery"
+        ],
+        "recovered_validation": recovered,
+        "output": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+    }
+
+
+def _write_fake_v7_validator(
+    project: Path, *, recovered: dict[str, Any], legacy: dict[str, Any]
+) -> Path:
     path = project / "scripts" / "validate_v7_pilot.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        "REPORT = " + repr(report) + "\n\n"
-        "def validate_pilot(**_kwargs):\n"
-        "    return REPORT\n",
+        "RECOVERED = " + repr(recovered) + "\n"
+        "LEGACY = " + repr(legacy) + "\n\n"
+        "def validate_pilot(*, allow_device_execution_equivalence=False, **_kwargs):\n"
+        "    return RECOVERED if allow_device_execution_equivalence else LEGACY\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -173,24 +304,71 @@ def _write_v7_validation_fixture(
     *,
     stored_report: dict[str, Any] | None = None,
     current_report: dict[str, Any] | None = None,
-) -> tuple[Path, Path, dict[str, Any]]:
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
     project = tmp_path / "project"
     project.mkdir()
     protocol_path = project / "configs" / "protocol_v7_mechanism.yaml"
     protocol_path.parent.mkdir(parents=True)
     protocol_path.write_text("protocol_version: 7\n", encoding="utf-8", newline="\n")
-    report = stored_report or _v7_pass_report(
+    recovered = stored_report or _v7_pass_report(
         protocol, protocol_file_sha256=tool._sha256_file(protocol_path)
     )
+    legacy = _v7_legacy_invalid_report(recovered)
+    sidecar = _v7_device_recovery_sidecar(recovered, legacy)
     validation_path = project / protocol["pilot_acceptance"]["validation_output"]
     validation_path.parent.mkdir(parents=True)
     validation_path.write_text(
-        json.dumps(report, sort_keys=True) + "\n",
+        json.dumps(legacy, sort_keys=True) + "\n",
         encoding="utf-8",
         newline="\n",
     )
-    _write_fake_v7_validator(project, current_report or report)
-    return project, protocol_path, report
+    recovery_path = project / V7_PILOT_DEVICE_RECOVERY_OUTPUT
+    recovery_path.write_text(
+        json.dumps(sidecar, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _write_fake_v7_validator(
+        project,
+        recovered=current_report or recovered,
+        legacy=legacy,
+    )
+    return project, protocol_path, recovered, sidecar
+
+
+def _patch_v7_device_recovery_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    project: Path,
+    protocol: dict[str, Any],
+    recovered: dict[str, Any],
+    device_recovery: dict[str, Any] | None = None,
+    health_recovery: dict[str, Any] | None = None,
+) -> None:
+    validation_path = (
+        project / protocol["pilot_acceptance"]["validation_output"]
+    ).resolve()
+    real_sha256 = tool._sha256_file
+    monkeypatch.setattr(
+        tool,
+        "_sha256_file",
+        lambda path: (
+            V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+            if Path(path).resolve() == validation_path
+            else real_sha256(path)
+        ),
+    )
+    monkeypatch.setattr(
+        tool,
+        "validate_health_recovery_release",
+        lambda *_args, **_kwargs: health_recovery
+        or recovered["health_compatibility_recovery"],
+    )
+    monkeypatch.setattr(
+        tool,
+        "validate_pilot_device_recovery_release",
+        lambda *_args, **_kwargs: device_recovery or _v7_device_recovery(),
+    )
 
 
 def test_v7_signoff_uses_the_accountable_author_contract() -> None:
@@ -209,11 +387,14 @@ def test_v7_pilot_acceptance_is_revalidated_and_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     protocol = _v7_protocol()
-    project, protocol_path, report = _write_v7_validation_fixture(tmp_path, protocol)
-    monkeypatch.setattr(
-        tool,
-        "validate_health_recovery_release",
-        lambda *_args, **_kwargs: report["health_compatibility_recovery"],
+    project, protocol_path, report, sidecar = _write_v7_validation_fixture(
+        tmp_path, protocol
+    )
+    _patch_v7_device_recovery_bindings(
+        monkeypatch,
+        project=project,
+        protocol=protocol,
+        recovered=report,
     )
 
     bound = tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
@@ -226,6 +407,8 @@ def test_v7_pilot_acceptance_is_revalidated_and_bound(
     assert bound["health_compatibility_recovery"] == report[
         "health_compatibility_recovery"
     ]
+    assert bound["artifact_class"] == sidecar["artifact_class"]
+    assert bound["device_compatibility_recovery"] == sidecar["release_delta"]
     assert set(bound["datasets"]) == {"cifar100"}
 
 
@@ -241,24 +424,31 @@ def test_v7_pilot_acceptance_rejects_missing_validation(tmp_path: Path) -> None:
         tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
 
 
-def test_v7_pilot_acceptance_rejects_modified_validation(tmp_path: Path) -> None:
+def test_v7_pilot_acceptance_rejects_modified_recovered_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     protocol = _v7_protocol()
-    project = tmp_path / "project"
-    project.mkdir()
-    protocol_path = project / "configs" / "protocol_v7_mechanism.yaml"
-    protocol_path.parent.mkdir(parents=True)
-    protocol_path.write_text("protocol_version: 7\n", encoding="utf-8", newline="\n")
-    current = _v7_pass_report(
-        protocol, protocol_file_sha256=tool._sha256_file(protocol_path)
+    project, protocol_path, report, _sidecar = _write_v7_validation_fixture(
+        tmp_path, protocol
     )
-    stored = copy.deepcopy(current)
-    stored["matrix_manifest_sha256"] = "a" * 64
-    validation_path = project / protocol["pilot_acceptance"]["validation_output"]
-    validation_path.parent.mkdir(parents=True)
-    validation_path.write_text(json.dumps(stored) + "\n", encoding="utf-8")
-    _write_fake_v7_validator(project, current)
+    current = copy.deepcopy(report)
+    current["matrix_manifest_sha256"] = "a" * 64
+    _write_fake_v7_validator(
+        project,
+        recovered=current,
+        legacy=_v7_legacy_invalid_report(report),
+    )
+    _patch_v7_device_recovery_bindings(
+        monkeypatch,
+        project=project,
+        protocol=protocol,
+        recovered=report,
+    )
 
-    with pytest.raises(tool.FreezeManifestError, match="differs from the current"):
+    with pytest.raises(
+        tool.FreezeManifestError,
+        match="differs from the current pilot artifacts",
+    ):
         tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
 
 
@@ -266,13 +456,17 @@ def test_v7_pilot_acceptance_rejects_unsealed_recovery_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     protocol = _v7_protocol()
-    project, protocol_path, report = _write_v7_validation_fixture(tmp_path, protocol)
+    project, protocol_path, report, _sidecar = _write_v7_validation_fixture(
+        tmp_path, protocol
+    )
     verified = copy.deepcopy(report["health_compatibility_recovery"])
     verified["record_sha256"] = "0" * 64
-    monkeypatch.setattr(
-        tool,
-        "validate_health_recovery_release",
-        lambda *_args, **_kwargs: verified,
+    _patch_v7_device_recovery_bindings(
+        monkeypatch,
+        project=project,
+        protocol=protocol,
+        recovered=report,
+        health_recovery=verified,
     )
 
     with pytest.raises(tool.FreezeManifestError, match="differs from the sealed"):
@@ -283,8 +477,11 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
     protocol_hash = tool._stable_hash(protocol)
     environment = "e" * 64
     recovery = _v7_recovery()
+    device_recovery = _v7_device_recovery()
     pilot = {
-        "artifact_class": "NON_REPORTABLE_V7_MECHANISM_PILOT_ACCEPTANCE",
+        "artifact_class": (
+            "NON_REPORTABLE_V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY"
+        ),
         "status": "PASS",
         "pass": True,
         "path": protocol["pilot_acceptance"]["validation_output"],
@@ -299,6 +496,7 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
         "pilot_run_manifest_csv_sha256": "3" * 64,
         "validator": {"path": "scripts/validate_v7_pilot.py", "sha256": "b" * 64},
         "health_compatibility_recovery": recovery,
+        "device_compatibility_recovery": device_recovery,
         "datasets": {
             "cifar100": {
                 "status": "PASS",
@@ -341,7 +539,11 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
                 "file_sha256": (
                     "b" * 64
                     if path
-                    in {"scripts/validate_v7_pilot.py", V7_HEALTH_RECOVERY_RELEASE_RECORD}
+                    in {
+                        "scripts/validate_v7_pilot.py",
+                        V7_HEALTH_RECOVERY_RELEASE_RECORD,
+                        V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
+                    }
                     else "c" * 64
                 ),
             }
@@ -426,6 +628,30 @@ def test_runtime_v7_formal_gate_requires_exact_pilot_matrix_and_sources(
                 "health_compatibility_recovery"
             ].update({"corrected_field": "source.other"}),
             "sealed health compatibility recovery",
+        ),
+        (
+            lambda stored: stored["pilot_validation"][
+                "device_compatibility_recovery"
+            ].update({"accepted_execution_device": "cuda:1"}),
+            "device compatibility recovery",
+        ),
+        (
+            lambda stored: stored["pilot_validation"][
+                "device_compatibility_recovery"
+            ].update({"frozen_runtime_device": "cuda:0"}),
+            "device compatibility recovery",
+        ),
+        (
+            lambda stored: stored["pilot_validation"][
+                "device_compatibility_recovery"
+            ].update({"original_validation_sha256": "0" * 64}),
+            "device compatibility recovery",
+        ),
+        (
+            lambda stored: stored["gate_sources"][
+                V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD
+            ].update({"file_sha256": "0" * 64}),
+            "device compatibility recovery",
         ),
     ],
 )

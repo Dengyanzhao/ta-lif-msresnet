@@ -921,6 +921,12 @@ def run_matrix(
     v5_pilot = bool(pilot_active and _is_v5_pilot(protocol))
     v6_pilot = bool(pilot_active and _is_v6_pilot(protocol))
     v7_pilot = bool(pilot_active and _is_v7_pilot(protocol))
+    v7_formal = bool(not pilot_active and _is_v7_pilot(protocol))
+    if v7_formal and device not in (None, "auto"):
+        raise ValueError(
+            "Protocol V7 formal execution must retain runtime.device='auto'; "
+            "set CUDA_VISIBLE_DEVICES=0 and omit --device (or use --device auto)"
+        )
     if config_dir is None and config_path is None:
         if protocol_version in (3, 4, 5, 6, 7):
             matrix_key = "pilot_matrix" if pilot_active else "formal_matrix"

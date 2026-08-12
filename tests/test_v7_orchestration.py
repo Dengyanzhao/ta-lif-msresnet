@@ -279,7 +279,6 @@ def test_v7_formal_rejects_same_size_matrix_with_tampered_run_identity(
         matrix_runner.run_matrix(
             config_dir=formal_matrix,
             protocol_path=tmp_path / protocol["artifact_paths"]["protocol"],
-            device="cuda:0",
             stop_on_error=True,
         )
     assert not list(tmp_path.rglob("attempt_*.stdout.log"))
@@ -343,6 +342,30 @@ def test_v7_formal_rejects_every_partial_selection(
 
     with pytest.raises(ValueError, match="complete frozen 48-run matrix"):
         matrix_runner.run_matrix(**kwargs)
+
+
+@pytest.mark.parametrize("device", ["cuda:0", "cuda:1", "cpu"])
+def test_v7_formal_rejects_device_override_before_the_freeze_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+) -> None:
+    formal_matrix = tmp_path / "configs" / "v7-formal"
+    formal_matrix.mkdir(parents=True)
+    protocol = {
+        "protocol_version": 7,
+        "study_stage": "health_pilot_formal",
+        "artifact_paths": {"formal_matrix": "configs/v7-formal"},
+    }
+    monkeypatch.setattr(matrix_runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(matrix_runner, "load_protocol", lambda _path: protocol)
+
+    with pytest.raises(ValueError, match="retain runtime.device='auto'"):
+        matrix_runner.run_matrix(
+            config_dir=formal_matrix,
+            protocol_path=tmp_path / "configs" / "protocol-v7.yaml",
+            device=device,
+        )
 
 
 def test_v7_pilot_author_freeze_failure_precedes_health_and_runtime(
@@ -508,7 +531,6 @@ def test_v7_formal_freeze_failure_blocks_before_matrix_or_subprocess(
         matrix_runner.run_matrix(
             config_dir=formal_matrix,
             protocol_path=protocol_path,
-            device="cuda:0",
             stop_on_error=True,
         )
     assert not list(tmp_path.rglob("attempt_*.stdout.log"))

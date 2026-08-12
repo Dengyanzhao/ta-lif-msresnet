@@ -50,6 +50,8 @@ from talif_msresnet.utils import sha256_file, stable_hash
 V7_RELEASE_SOURCE_PATHS = (
     "PREREGISTRATION_SIGNOFF_V7_MECHANISM.md",
     "V6_MECHANISM_TERMINATION.md",
+    "V7_HEALTH_COMPATIBILITY_RECOVERY_RELEASE.json",
+    "V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY_RELEASE.json",
     "V7_STATISTICAL_ANALYSIS_AUDIT.md",
     "configs/protocol_v7_mechanism.yaml",
     "scripts/analyze_v7_results.py",

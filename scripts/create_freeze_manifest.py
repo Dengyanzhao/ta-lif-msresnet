@@ -41,9 +41,15 @@ from talif_msresnet.config import (  # noqa: E402
     validate_run_mapping,
 )
 from talif_msresnet.pilot_v7 import (  # noqa: E402
+    V7_HEALTH_RECOVERY_SEAL_COMMIT,
     V7_HEALTH_RECOVERY_RELEASE_RECORD,
+    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
+    V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+    V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
     PilotV7Error,
     validate_health_recovery_release,
+    validate_pilot_device_recovery_release,
 )
 
 SCHEMA = "ta-lif-msresnet-freeze-manifest-v1"
@@ -125,6 +131,7 @@ V6_REQUIRED_SOURCE_PATHS = (
 )
 V7_REQUIRED_SOURCE_PATHS = (
     V7_HEALTH_RECOVERY_RELEASE_RECORD,
+    V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
     "V7_MECHANISM_5090_RUNBOOK.md",
     "V7_STATISTICAL_ANALYSIS_AUDIT.md",
     "src/talif_msresnet/benchmark.py",
@@ -1335,13 +1342,35 @@ def _validate_v7_pilot_acceptance(
     validation_value = acceptance.get("validation_output")
     if not isinstance(validation_value, str) or not validation_value.strip():
         raise FreezeManifestError("Protocol v7 has no pilot validation output path")
-    validation_path = _inside(
+    canonical_validation_path = _inside(
         project_root,
         validation_value,
         "V7 pilot validation",
         kind="file",
     )
-    stored = dict(_read_json(validation_path, "v7 pilot validation"))
+    if (
+        canonical_validation_path.relative_to(project_root).as_posix()
+        != V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION
+        or _sha256_file(canonical_validation_path)
+        != V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+    ):
+        raise FreezeManifestError(
+            "V7 canonical pilot validation is not the sealed original INVALID evidence"
+        )
+    canonical = dict(_read_json(canonical_validation_path, "V7 canonical pilot validation"))
+    recovery_path = _inside(
+        project_root,
+        V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "V7 pilot device recovery",
+        kind="file",
+    )
+    stored = dict(_read_json(recovery_path, "V7 pilot device recovery"))
+    recovered_value = stored.get("recovered_validation")
+    if not isinstance(recovered_value, Mapping):
+        raise FreezeManifestError(
+            "V7 pilot device recovery has no recovered_validation mapping"
+        )
+    recovered = dict(recovered_value)
 
     validator_path = project_root / "scripts" / "validate_v7_pilot.py"
     if not validator_path.is_file():
@@ -1366,29 +1395,20 @@ def _validate_v7_pilot_acceptance(
     dataset_name = acceptance.get("dataset")
     health_seed = acceptance.get("health_seed")
     pilot_seed = acceptance.get("pilot_seed")
-    run_handling = acceptance.get("run_handling")
     artifacts = artifact_paths_for_protocol(protocol)
     expected_top = {
         "schema_version": 1,
-        "protocol_version": 7,
-        "artifact_class": "NON_REPORTABLE_V7_MECHANISM_PILOT_ACCEPTANCE",
+        "artifact_class": "NON_REPORTABLE_V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY",
         "reporting_eligibility": "FORBIDDEN_FROM_MANUSCRIPT_RESULTS",
         "confirmatory_analysis_eligibility": False,
         "status": "PASS",
         "pass": True,
-        "decision": "ACCEPT_V7_SIX_CONDITION_120_EPOCH_PILOT_RELEASE_FORMAL_FREEZE",
+        "decision": "RECOVER_V7_PILOT_PASS_AFTER_DEVICE_EXECUTION_EQUIVALENCE_FIX",
         "exit_code": 0,
-        "protocol_path": protocol_path.relative_to(project_root).as_posix(),
-        "protocol_file_sha256": _sha256_file(protocol_path),
         "protocol_hash": _stable_hash(protocol),
         "acceptance_hash": _stable_hash(dict(acceptance)),
-        "required_epochs": pilot_contract.get("epochs"),
-        "config_dir": artifacts.get("pilot_matrix"),
-        "failure_action": (
-            run_handling.get("failure_action")
-            if isinstance(run_handling, Mapping)
-            else None
-        ),
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "output": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
     }
     mismatches = [
         key for key, expected in expected_top.items() if stored.get(key) != expected
@@ -1407,10 +1427,10 @@ def _validate_v7_pilot_acceptance(
     if not isinstance(health_seed, int) or not isinstance(pilot_seed, int):
         mismatches.append("pilot seed bindings")
     for key in ("matrix_manifest_sha256", "run_manifest_csv_sha256"):
-        if SHA256_RE.fullmatch(str(stored.get(key, ""))) is None:
+        if SHA256_RE.fullmatch(str(recovered.get(key, ""))) is None:
             mismatches.append(key)
 
-    datasets = stored.get("datasets")
+    datasets = recovered.get("datasets")
     evidence: Mapping[str, Any] | None = None
     if not isinstance(datasets, Mapping) or set(datasets) != {"cifar100"}:
         mismatches.append("datasets")
@@ -1420,10 +1440,10 @@ def _validate_v7_pilot_acceptance(
             evidence = candidate
         else:
             mismatches.append("cifar100 dataset evidence")
-    environment_sha256 = stored.get("training_environment_sha256")
+    environment_sha256 = recovered.get("training_environment_sha256")
     if SHA256_RE.fullmatch(str(environment_sha256 or "")) is None:
         mismatches.append("training_environment_sha256")
-    recovery = stored.get("health_compatibility_recovery")
+    recovery = recovered.get("health_compatibility_recovery")
     if not isinstance(recovery, Mapping):
         mismatches.append("health_compatibility_recovery")
 
@@ -1474,8 +1494,11 @@ def _validate_v7_pilot_acceptance(
                     or run.get("threshold_failures") != []
                 ):
                     mismatches.append(f"cifar100.runs.{condition}")
-    if stored.get("integrity_failures") != [] or stored.get("threshold_failures") != []:
-        mismatches.append("failure records")
+    if (
+        recovered.get("integrity_failures") != []
+        or recovered.get("threshold_failures") != []
+    ):
+        mismatches.append("recovered_validation.failure_records")
     if mismatches:
         raise FreezeManifestError(
             "V7 pilot validation is not an exact six-condition PASS: "
@@ -1487,6 +1510,7 @@ def _validate_v7_pilot_acceptance(
             protocol_path=protocol_path,
             config_dir=project_root / artifacts["pilot_matrix"],
             repository_root=project_root,
+            allow_device_execution_equivalence=True,
         )
     except Exception as exc:
         raise FreezeManifestError(
@@ -1494,13 +1518,13 @@ def _validate_v7_pilot_acceptance(
         ) from exc
     if not isinstance(current, Mapping):
         raise FreezeManifestError("V7 pilot validator returned a non-mapping result")
-    stored_comparable = dict(stored)
+    stored_comparable = dict(recovered)
     current_comparable = dict(current)
     stored_comparable.pop("validated_at", None)
     current_comparable.pop("validated_at", None)
     if stored_comparable != current_comparable:
         raise FreezeManifestError(
-            "Stored v7 pilot validation differs from the current pilot artifacts"
+            "Recovered V7 pilot validation differs from the current pilot artifacts"
         )
 
     assert isinstance(recovery, Mapping)
@@ -1523,26 +1547,64 @@ def _validate_v7_pilot_acceptance(
             "the sealed release"
         )
 
+    legacy = validate_pilot(
+        protocol_path=protocol_path,
+        config_dir=project_root / artifacts["pilot_matrix"],
+        repository_root=project_root,
+        allow_device_execution_equivalence=False,
+    )
+    comparable_canonical = dict(canonical)
+    comparable_legacy = dict(legacy)
+    comparable_canonical.pop("validated_at", None)
+    comparable_legacy.pop("validated_at", None)
+    original = stored.get("original_validation")
+    if (
+        not isinstance(original, Mapping)
+        or original.get("path") != V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION
+        or original.get("sha256") != V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+        or original.get("status") != "INVALID"
+        or original.get("legacy_reproduction") != "EXACT_EXCEPT_VALIDATED_AT"
+        or comparable_canonical != comparable_legacy
+    ):
+        raise FreezeManifestError(
+            "V7 canonical INVALID does not exactly reproduce under the legacy validator"
+        )
+    try:
+        device_release = validate_pilot_device_recovery_release(project_root)
+    except (OSError, PilotV7Error) as exc:
+        raise FreezeManifestError(
+            "V7 pilot device compatibility recovery fails sealed revalidation: "
+            f"{exc}"
+        ) from exc
+    release_delta = stored.get("release_delta")
+    if not isinstance(release_delta, Mapping) or dict(release_delta) != device_release:
+        raise FreezeManifestError(
+            "V7 pilot validation device compatibility recovery differs from the sealed release"
+        )
+
     assert evidence is not None
     return {
         "artifact_class": stored["artifact_class"],
         "status": "PASS",
         "pass": True,
-        "path": validation_path.relative_to(project_root).as_posix(),
-        "sha256": _sha256_file(validation_path),
-        "protocol_file_sha256": stored["protocol_file_sha256"],
-        "protocol_hash": stored["protocol_hash"],
-        "acceptance_hash": stored["acceptance_hash"],
-        "validated_at": stored.get("validated_at"),
+        "path": recovery_path.relative_to(project_root).as_posix(),
+        "sha256": _sha256_file(recovery_path),
+        "canonical_invalid_path": canonical_validation_path.relative_to(project_root).as_posix(),
+        "canonical_invalid_sha256": _sha256_file(canonical_validation_path),
+        "protocol_file_sha256": recovered["protocol_file_sha256"],
+        "protocol_hash": recovered["protocol_hash"],
+        "acceptance_hash": recovered["acceptance_hash"],
+        "validated_at": recovered.get("validated_at"),
         "training_environment_sha256": environment_sha256,
         "conditions": list(conditions),
-        "pilot_matrix_manifest_sha256": stored["matrix_manifest_sha256"],
-        "pilot_run_manifest_csv_sha256": stored["run_manifest_csv_sha256"],
+        "pilot_matrix_manifest_sha256": recovered["matrix_manifest_sha256"],
+        "pilot_run_manifest_csv_sha256": recovered["run_manifest_csv_sha256"],
         "validator": {
             "path": validator_path.relative_to(project_root).as_posix(),
             "sha256": _sha256_file(validator_path),
         },
         "health_compatibility_recovery": recovery,
+        "device_compatibility_recovery": device_release,
         "datasets": {
             "cifar100": {
                 "status": evidence["status"],
@@ -1789,13 +1851,27 @@ def build_manifest(
                 "V5 recovery validator commit must equal the formal freeze commit"
             )
     if is_v7 and isinstance(pilot_validation, Mapping):
-        recovery = pilot_validation.get("health_compatibility_recovery")
-        if not isinstance(recovery, Mapping) or recovery.get(
-            "recovery_commit"
-        ) != commit:
+        health_recovery = pilot_validation.get("health_compatibility_recovery")
+        device_recovery = pilot_validation.get("device_compatibility_recovery")
+        if (
+            not isinstance(health_recovery, Mapping)
+            or health_recovery.get("recovery_commit")
+            != V7_HEALTH_RECOVERY_SEAL_COMMIT
+        ):
             raise FreezeManifestError(
-                "V7 health compatibility recovery commit must equal the formal "
-                "freeze commit"
+                "V7 health compatibility recovery must remain bound to its fixed "
+                "first-level seal"
+            )
+        if not isinstance(device_recovery, Mapping):
+            raise FreezeManifestError(
+                "V7 formal freeze has no sealed device compatibility recovery"
+            )
+        recovery_commit = str(device_recovery.get("recovery_commit", ""))
+        merge_base = _git(repo_root, ("merge-base", recovery_commit, commit))
+        if merge_base != recovery_commit:
+            raise FreezeManifestError(
+                "V7 device compatibility recovery seal must be an ancestor of the "
+                "formal freeze commit"
             )
     committed_protocol = _assert_committed_text(
         repo_root, commit, protocol_path, "Protocol at freeze commit"

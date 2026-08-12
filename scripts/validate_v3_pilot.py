@@ -401,6 +401,7 @@ def _checkpoint_failures(
     protocol: Mapping[str, Any],
     expected_output_dir: str | None = None,
     actual_output_root: Path | None = None,
+    artifact_config_normalizer: Any | None = None,
 ) -> list[str]:
     try:
         checkpoint = load_checkpoint(path, map_location="cpu")
@@ -443,6 +444,15 @@ def _checkpoint_failures(
             expected_output_dir=expected_output_dir,
             actual_output_root=actual_output_root,
         )
+    if artifact_config_normalizer is not None:
+        try:
+            embedded_raw = artifact_config_normalizer(embedded_raw)
+        except Exception as exc:  # noqa: BLE001 - report artifact-integrity failures.
+            failures.append(
+                f"{label} embedded config normalization failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return failures
     try:
         embedded = validate_run_mapping(embedded_raw, protocol)
     except (TypeError, ValueError) as exc:
