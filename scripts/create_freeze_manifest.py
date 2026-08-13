@@ -41,13 +41,15 @@ from talif_msresnet.config import (  # noqa: E402
     validate_run_mapping,
 )
 from talif_msresnet.pilot_v7 import (  # noqa: E402
-    V7_HEALTH_RECOVERY_SEAL_COMMIT,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
     V7_HEALTH_RECOVERY_RELEASE_RECORD,
+    V7_HEALTH_RECOVERY_SEAL_COMMIT,
     V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
     V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256,
     V7_PILOT_DEVICE_RECOVERY_OUTPUT,
     V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
     PilotV7Error,
+    validate_checkpoint_serialization_recovery_release,
     validate_health_recovery_release,
     validate_pilot_device_recovery_release,
 )
@@ -130,6 +132,7 @@ V6_REQUIRED_SOURCE_PATHS = (
     "scripts/validate_v6_pilot.py",
 )
 V7_REQUIRED_SOURCE_PATHS = (
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
     V7_HEALTH_RECOVERY_RELEASE_RECORD,
     V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
     "V7_MECHANISM_5090_RUNBOOK.md",
@@ -1581,6 +1584,29 @@ def _validate_v7_pilot_acceptance(
         raise FreezeManifestError(
             "V7 pilot validation device compatibility recovery differs from the sealed release"
         )
+    try:
+        serialization_release = validate_checkpoint_serialization_recovery_release(
+            project_root
+        )
+    except (OSError, PilotV7Error) as exc:
+        raise FreezeManifestError(
+            "V7 checkpoint serialization compatibility recovery fails sealed "
+            f"revalidation: {exc}"
+        ) from exc
+    stored_serialization_release = stored.get("checkpoint_serialization_recovery")
+    if not isinstance(stored_serialization_release, Mapping) or dict(
+        stored_serialization_release
+    ) != serialization_release:
+        raise FreezeManifestError(
+            "V7 pilot validation checkpoint serialization recovery differs from "
+            "the sealed release"
+        )
+    if stored.get("recovery_validator_commit") != serialization_release.get(
+        "recovery_commit"
+    ):
+        raise FreezeManifestError(
+            "V7 recovery validator commit is not the final serialization seal"
+        )
 
     assert evidence is not None
     return {
@@ -1603,8 +1629,10 @@ def _validate_v7_pilot_acceptance(
             "path": validator_path.relative_to(project_root).as_posix(),
             "sha256": _sha256_file(validator_path),
         },
+        "recovery_validator_commit": serialization_release["recovery_commit"],
         "health_compatibility_recovery": recovery,
         "device_compatibility_recovery": device_release,
+        "checkpoint_serialization_recovery": serialization_release,
         "datasets": {
             "cifar100": {
                 "status": evidence["status"],
@@ -1853,6 +1881,9 @@ def build_manifest(
     if is_v7 and isinstance(pilot_validation, Mapping):
         health_recovery = pilot_validation.get("health_compatibility_recovery")
         device_recovery = pilot_validation.get("device_compatibility_recovery")
+        serialization_recovery = pilot_validation.get(
+            "checkpoint_serialization_recovery"
+        )
         if (
             not isinstance(health_recovery, Mapping)
             or health_recovery.get("recovery_commit")
@@ -1866,12 +1897,32 @@ def build_manifest(
             raise FreezeManifestError(
                 "V7 formal freeze has no sealed device compatibility recovery"
             )
+        if not isinstance(serialization_recovery, Mapping):
+            raise FreezeManifestError(
+                "V7 formal freeze has no sealed checkpoint serialization recovery"
+            )
+        if pilot_validation.get("recovery_validator_commit") != (
+            serialization_recovery.get("recovery_commit")
+        ):
+            raise FreezeManifestError(
+                "V7 recovery validator commit does not match the checkpoint "
+                "serialization recovery seal"
+            )
         recovery_commit = str(device_recovery.get("recovery_commit", ""))
         merge_base = _git(repo_root, ("merge-base", recovery_commit, commit))
         if merge_base != recovery_commit:
             raise FreezeManifestError(
                 "V7 device compatibility recovery seal must be an ancestor of the "
                 "formal freeze commit"
+            )
+        serialization_commit = str(serialization_recovery.get("recovery_commit", ""))
+        serialization_merge_base = _git(
+            repo_root, ("merge-base", serialization_commit, commit)
+        )
+        if serialization_merge_base != serialization_commit:
+            raise FreezeManifestError(
+                "V7 checkpoint serialization recovery seal must be an ancestor "
+                "of the formal freeze commit"
             )
     committed_protocol = _assert_committed_text(
         repo_root, commit, protocol_path, "Protocol at freeze commit"

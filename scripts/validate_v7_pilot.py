@@ -38,6 +38,7 @@ from talif_msresnet.config_v7 import (
 from talif_msresnet.pathing import artifact_path_reference
 from talif_msresnet.pilot_v7 import (
     REPORTING_ELIGIBILITY,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
     V7_HEALTH_RECOVERY_SEAL_COMMIT,
     V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
     V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
@@ -54,6 +55,7 @@ from talif_msresnet.pilot_v7 import (
     require_v7_author_freeze,
     resolve_pilot_block,
     validate_attempt_receipt,
+    validate_checkpoint_serialization_recovery_release,
     validate_health_report,
     validate_pilot_device_recovery_release,
 )
@@ -642,7 +644,7 @@ def _stored_recovery_execution_identity_failures(
         repository_root=repository_root,
         expected_config=expected_config,
     )
-    if raw != reference_raw:
+    if not _type_strict_equal(raw, reference_raw):
         failures.append(f"{label} raw config differs from resolved_config.json")
     if stored_execution_hash != raw_execution_hash:
         failures.append(f"{label} execution_hash does not hash its raw config")
@@ -651,6 +653,51 @@ def _stored_recovery_execution_identity_failures(
             f"{label} execution_hash differs from resolved_config.json identity"
         )
     return failures
+
+
+def _checkpoint_milestones_container_equivalent(
+    checkpoint_raw: Any, resolved_raw: Mapping[str, Any]
+) -> bool:
+    """Allow only the tuple-to-list conversion caused by JSON serialization."""
+
+    if not isinstance(checkpoint_raw, Mapping):
+        return False
+    checkpoint_optimizer = checkpoint_raw.get("optimizer")
+    resolved_optimizer = resolved_raw.get("optimizer")
+    if not isinstance(checkpoint_optimizer, Mapping) or not isinstance(
+        resolved_optimizer, Mapping
+    ):
+        return False
+    checkpoint_milestones = checkpoint_optimizer.get("milestones")
+    resolved_milestones = resolved_optimizer.get("milestones")
+    if type(checkpoint_milestones) is not tuple or type(resolved_milestones) is not list:
+        return False
+    if not _type_strict_equal(list(checkpoint_milestones), resolved_milestones):
+        return False
+
+    normalized = dict(checkpoint_raw)
+    normalized_optimizer = dict(checkpoint_optimizer)
+    normalized_optimizer["milestones"] = list(checkpoint_milestones)
+    normalized["optimizer"] = normalized_optimizer
+    return _type_strict_equal(normalized, resolved_raw)
+
+
+def _type_strict_equal(left: Any, right: Any) -> bool:
+    """Compare nested config payloads without Python's bool/int coercion."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Mapping):
+        return (
+            set(left) == set(right)
+            and all(_type_strict_equal(left[key], right[key]) for key in left)
+        )
+    if isinstance(left, (list, tuple)):
+        return len(left) == len(right) and all(
+            _type_strict_equal(left_value, right_value)
+            for left_value, right_value in zip(left, right)
+        )
+    return bool(left == right)
 
 
 def _checkpoint_recovery_execution_identity_failures(
@@ -672,16 +719,27 @@ def _checkpoint_recovery_execution_identity_failures(
                 f"{type(exc).__name__}: {exc}"
             )
         ]
-    return _stored_recovery_execution_identity_failures(
-        checkpoint.get("config"),
+    checkpoint_raw = checkpoint.get("config")
+    failures = _stored_recovery_execution_identity_failures(
+        checkpoint_raw,
         checkpoint.get("execution_hash"),
         label=label,
         protocol=protocol,
         repository_root=repository_root,
         expected_config=expected_config,
-        reference_raw=reference_raw,
+        reference_raw=checkpoint_raw if isinstance(checkpoint_raw, Mapping) else {},
         reference_execution_hash=reference_execution_hash,
     )
+    failures = [
+        failure
+        for failure in failures
+        if failure != f"{label} raw config differs from resolved_config.json"
+    ]
+    if not _checkpoint_milestones_container_equivalent(
+        checkpoint_raw, reference_raw
+    ):
+        failures.append(f"{label} raw config differs from resolved_config.json")
+    return failures
 
 
 def _trainer_recovery_launch_failures(
@@ -1441,6 +1499,19 @@ def _device_recovery_report(
     if recovered.get("training_environment_sha256") is None:
         raise PilotValidationError("Recovered validation has no shared training environment")
     release = _device_recovery_release_binding(repository_root)
+    try:
+        serialization_release = validate_checkpoint_serialization_recovery_release(
+            repository_root
+        )
+    except PilotV7Error as exc:
+        raise PilotValidationError(str(exc)) from exc
+    if (
+        serialization_release.get("allowed_container_path")
+        != V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH
+    ):
+        raise PilotValidationError(
+            "Checkpoint serialization recovery does not bind the unique milestones path"
+        )
     health = recovered.get("health_compatibility_recovery")
     if not isinstance(health, Mapping):
         raise PilotValidationError("Recovered validation has no sealed health recovery binding")
@@ -1459,8 +1530,9 @@ def _device_recovery_report(
         "protocol_hash": recovered.get("protocol_hash"),
         "acceptance_hash": recovered.get("acceptance_hash"),
         "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
-        "recovery_validator_commit": release["recovery_commit"],
+        "recovery_validator_commit": serialization_release["recovery_commit"],
         "release_delta": release,
+        "checkpoint_serialization_recovery": serialization_release,
         "recovery_validator": {
             "path": artifact_path_reference(Path(__file__).resolve(), repository_root),
             "sha256": sha256_file(Path(__file__).resolve()),

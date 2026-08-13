@@ -45,12 +45,17 @@ from talif_msresnet.config_v7 import (
     validate_v7_cifar100_provenance_files,
     validate_v7_protocol,
 )
+from talif_msresnet.pilot_v7 import (
+    PilotV7Error,
+    validate_checkpoint_serialization_recovery_release,
+)
 from talif_msresnet.utils import sha256_file, stable_hash
 
 V7_RELEASE_SOURCE_PATHS = (
     "PREREGISTRATION_SIGNOFF_V7_MECHANISM.md",
     "V6_MECHANISM_TERMINATION.md",
     "V7_HEALTH_COMPATIBILITY_RECOVERY_RELEASE.json",
+    "V7_CHECKPOINT_SERIALIZATION_COMPATIBILITY_RECOVERY_RELEASE.json",
     "V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY_RELEASE.json",
     "V7_STATISTICAL_ANALYSIS_AUDIT.md",
     "configs/protocol_v7_mechanism.yaml",
@@ -519,6 +524,15 @@ def validate_source_release(
     protocol = validate_v7_protocol(load_protocol(protocol_path))
     commit = _assert_tracked_clean()
     _assert_sources_tracked()
+    try:
+        checkpoint_serialization_recovery = (
+            validate_checkpoint_serialization_recovery_release(PROJECT_ROOT)
+        )
+    except (OSError, PilotV7Error) as exc:
+        raise V7SourceReleaseError(
+            "V7 checkpoint serialization compatibility recovery fails sealed "
+            f"revalidation: {exc}"
+        ) from exc
     pilot = _validate_matrix(protocol, protocol_path, "pilot")
     formal = _validate_matrix(protocol, protocol_path, "formal")
     _assert_pristine_artifact_paths(protocol)
@@ -547,6 +561,7 @@ def validate_source_release(
         "protocol_hash": stable_hash(protocol),
         "pilot_matrix": {**pilot, "directory": str(pilot["directory"])},
         "formal_matrix": {**formal, "directory": str(formal["directory"])},
+        "checkpoint_serialization_recovery": checkpoint_serialization_recovery,
         "local_data_verified": require_data,
         "package": package_summary,
     }

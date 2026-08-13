@@ -144,3 +144,65 @@ def test_instance_package_rejects_wrong_checked_out_branch(
 
     with pytest.raises(instance_package.V7InstancePackageError, match="exact release branch"):
         instance_package._assert_release_branch(tmp_path)
+
+
+def test_source_release_revalidates_checkpoint_serialization_seal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = {"protocol_version": 7}
+    recovery = {"recovery_commit": "a" * 40}
+    monkeypatch.setattr(source_release, "load_protocol", lambda _path: protocol)
+    monkeypatch.setattr(source_release, "validate_v7_protocol", lambda raw: raw)
+    monkeypatch.setattr(source_release, "_assert_tracked_clean", lambda: "b" * 40)
+    monkeypatch.setattr(source_release, "_assert_sources_tracked", lambda: None)
+    monkeypatch.setattr(
+        source_release,
+        "validate_checkpoint_serialization_recovery_release",
+        lambda _root: recovery,
+    )
+    monkeypatch.setattr(
+        source_release,
+        "_validate_matrix",
+        lambda _protocol, _path, stage: {
+            "directory": source_release.PROJECT_ROOT / stage,
+            "run_count": 6 if stage == "pilot" else 48,
+        },
+    )
+    monkeypatch.setattr(source_release, "_assert_pristine_artifact_paths", lambda _p: None)
+
+    report = source_release.validate_source_release(
+        protocol_path=source_release.PROJECT_ROOT
+        / source_release.V7_ARTIFACT_PATHS["protocol"],
+        require_data=False,
+        package=None,
+    )
+
+    assert report["checkpoint_serialization_recovery"] == recovery
+
+
+def test_source_release_rejects_unsealed_checkpoint_serialization_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = {"protocol_version": 7}
+    monkeypatch.setattr(source_release, "load_protocol", lambda _path: protocol)
+    monkeypatch.setattr(source_release, "validate_v7_protocol", lambda raw: raw)
+    monkeypatch.setattr(source_release, "_assert_tracked_clean", lambda: "b" * 40)
+    monkeypatch.setattr(source_release, "_assert_sources_tracked", lambda: None)
+    monkeypatch.setattr(
+        source_release,
+        "validate_checkpoint_serialization_recovery_release",
+        lambda _root: (_ for _ in ()).throw(
+            source_release.PilotV7Error("forged recovery record")
+        ),
+    )
+
+    with pytest.raises(
+        source_release.V7SourceReleaseError,
+        match="fails sealed revalidation: forged recovery record",
+    ):
+        source_release.validate_source_release(
+            protocol_path=source_release.PROJECT_ROOT
+            / source_release.V7_ARTIFACT_PATHS["protocol"],
+            require_data=False,
+            package=None,
+        )

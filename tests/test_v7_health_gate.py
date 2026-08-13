@@ -32,6 +32,12 @@ from talif_msresnet.pilot_v7 import (
     HEALTH_SEED_DISPOSITION,
     PILOT_SEED_DISPOSITION,
     REPORTING_ELIGIBILITY,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE,
     V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS,
     V7_HEALTH_RECOVERY_CORRECTED_FIELD,
     V7_HEALTH_RECOVERY_SCHEMA,
@@ -40,6 +46,7 @@ from talif_msresnet.pilot_v7 import (
     expected_pilot_configs,
     resolve_pilot_block,
     validate_attempt_receipt,
+    validate_checkpoint_serialization_recovery_release,
     validate_health_recovery_release,
     validate_health_report_payload,
 )
@@ -1380,4 +1387,287 @@ def test_device_recovery_release_uses_git_object_identity_after_crlf_checkout(
     record.write_bytes(b'{"record_sha256":"x"}\r\n')
     assert pilot_v7._git_blob_id(root, seal, record.name) == pilot_v7._git_blob_id(
         root, "HEAD", record.name
+    )
+
+
+def _sealed_v7_checkpoint_serialization_recovery_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    omit_implementation_path: str | None = None,
+    extra_implementation_path: bool = False,
+    implementation_parent_gap: bool = False,
+    seal_parent_gap: bool = False,
+    extra_seal_path: bool = False,
+    release_overrides: dict[str, Any] | None = None,
+    corrupt_record_hash: bool = False,
+    corrupt_implementation_hash_path: str | None = None,
+) -> tuple[Path, str, str, str, dict[str, Any]]:
+    root = tmp_path / "checkpoint-serialization-recovery"
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.name", "V7 Serialization Recovery Test")
+    _git(root, "config", "user.email", "v7-serialization@example.invalid")
+    _git(root, "config", "core.autocrlf", "true")
+
+    for relative in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"base:{relative}\n", encoding="utf-8")
+    _git(
+        root,
+        "add",
+        "--",
+        *V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS,
+    )
+    _git(root, "commit", "-m", "sealed device recovery")
+    base_seal_commit = _git(root, "rev-parse", "HEAD")
+    monkeypatch.setattr(
+        pilot_v7,
+        "V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT",
+        base_seal_commit,
+    )
+    monkeypatch.setattr(
+        pilot_v7, "V7_HEALTH_RECOVERY_SEAL_COMMIT", base_seal_commit
+    )
+
+    if implementation_parent_gap:
+        _git(root, "commit", "--allow-empty", "-m", "unexpected parent gap")
+    implementation_paths: list[str] = []
+    for relative in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS:
+        if relative == omit_implementation_path:
+            continue
+        (root / relative).write_text(f"implementation:{relative}\n", encoding="utf-8")
+        implementation_paths.append(relative)
+    if extra_implementation_path:
+        extra = root / "unexpected_implementation.py"
+        extra.write_text("unexpected = True\n", encoding="utf-8")
+        implementation_paths.append(extra.relative_to(root).as_posix())
+    _git(root, "add", "--", *implementation_paths)
+    _git(root, "commit", "-m", "implement checkpoint serialization recovery")
+    implementation_commit = _git(root, "rev-parse", "HEAD")
+    implementation_tree = _git(root, "rev-parse", f"{implementation_commit}^{{tree}}")
+    implementation_hashes = {
+        relative: pilot_v7.hashlib.sha256(
+            _git_bytes(root, "show", f"{implementation_commit}:{relative}")
+        ).hexdigest()
+        for relative in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+    }
+    if corrupt_implementation_hash_path is not None:
+        implementation_hashes[corrupt_implementation_hash_path] = "0" * 64
+
+    release = {
+        "schema": V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+        "base_device_recovery_seal_commit": base_seal_commit,
+        "pilot_execution_commit": base_seal_commit,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "original_validation_path": (
+            pilot_v7.V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION
+        ),
+        "original_validation_sha256": (
+            pilot_v7.V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+        ),
+        "recovery_output_path": pilot_v7.V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "protocol_hash": pilot_v7.V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+        "allowed_container_path": V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
+        "checkpoint_container_type": (
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE
+        ),
+        "json_container_type": V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE,
+        "canonical_payload_must_match": True,
+        "execution_hash_must_match": True,
+        "scientific_hash_must_match": True,
+        "allowed_changed_paths": list(
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+        ),
+        "implementation_file_sha256": implementation_hashes,
+    }
+    if release_overrides is not None:
+        release.update(release_overrides)
+    release["record_sha256"] = pilot_v7.stable_hash(release)
+    if corrupt_record_hash:
+        release["record_sha256"] = "0" * 64
+
+    if seal_parent_gap:
+        _git(root, "commit", "--allow-empty", "-m", "unexpected seal parent gap")
+    release_path = root / V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+    pilot_v7.exclusive_create_json(release_path, release)
+    seal_paths = [V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD]
+    if extra_seal_path:
+        extra = root / "unexpected_seal.txt"
+        extra.write_text("unexpected seal content\n", encoding="utf-8")
+        seal_paths.append(extra.relative_to(root).as_posix())
+    _git(root, "add", "--", *seal_paths)
+    _git(root, "commit", "-m", "seal checkpoint serialization recovery")
+    seal_commit = _git(root, "rev-parse", "HEAD")
+    return root, base_seal_commit, implementation_commit, seal_commit, release
+
+
+def test_checkpoint_serialization_recovery_accepts_exact_sealed_git_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, base, implementation, seal, release = (
+        _sealed_v7_checkpoint_serialization_recovery_fixture(tmp_path, monkeypatch)
+    )
+
+    binding = validate_checkpoint_serialization_recovery_release(root)
+
+    assert len(V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS) == 10
+    assert binding["base_device_recovery_seal_commit"] == base
+    assert binding["implementation_commit"] == implementation
+    assert binding["recovery_commit"] == seal
+    assert binding["observed_changes"] == [
+        f"M\t{path}"
+        for path in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+    ]
+    assert binding["record_sha256"] == pilot_v7.stable_hash(
+        {key: value for key, value in release.items() if key != "record_sha256"}
+    )
+    for relative in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS:
+        assert binding["implementation_file_sha256"][relative] == (
+            pilot_v7.hashlib.sha256(
+                _git_bytes(root, "show", f"{implementation}:{relative}")
+            ).hexdigest()
+        )
+    assert binding["tracked_clean"] is True
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_checkpoint_serialization_recovery_rejects_nonexact_implementation_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool
+) -> None:
+    omitted = (
+        V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS[-1]
+        if missing
+        else None
+    )
+    root, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path,
+        monkeypatch,
+        omit_implementation_path=omitted,
+        extra_implementation_path=not missing,
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="exact modification-only allowlist"):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+def test_checkpoint_serialization_recovery_rejects_wrong_implementation_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path, monkeypatch, implementation_parent_gap=True
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="directly follow the sealed device"):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+def test_checkpoint_serialization_recovery_rejects_nonancestor_base_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _base, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path, monkeypatch
+    )
+    tree = _git(root, "rev-parse", "HEAD^{tree}")
+    unrelated = _git(root, "commit-tree", tree, "-m", "unrelated base seal")
+    monkeypatch.setattr(
+        pilot_v7,
+        "V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT",
+        unrelated,
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="directly follow the sealed device"):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+def test_checkpoint_serialization_recovery_rejects_wrong_seal_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path, monkeypatch, seal_parent_gap=True
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="directly follow its implementation"):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+def test_checkpoint_serialization_recovery_rejects_extra_seal_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path, monkeypatch, extra_seal_path=True
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="add only its release record"):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+@pytest.mark.parametrize(
+    ("fixture_options", "error"),
+    [
+        (
+            {"release_overrides": {"canonical_payload_must_match": False}},
+            "canonical_payload_must_match",
+        ),
+        ({"corrupt_record_hash": True}, "record_sha256"),
+        (
+            {
+                "corrupt_implementation_hash_path": (
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS[0]
+                )
+            },
+            "implementation_file_sha256",
+        ),
+    ],
+)
+def test_checkpoint_serialization_recovery_rejects_tampered_release_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fixture_options: dict[str, Any],
+    error: str,
+) -> None:
+    root, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path, monkeypatch, **fixture_options
+    )
+
+    with pytest.raises(pilot_v7.PilotV7Error, match=error):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+def test_checkpoint_serialization_recovery_rejects_dirty_tracked_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, *_ = _sealed_v7_checkpoint_serialization_recovery_fixture(
+        tmp_path, monkeypatch
+    )
+    dirty = root / V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS[0]
+    dirty.write_text("dirty tracked source\n", encoding="utf-8")
+
+    with pytest.raises(pilot_v7.PilotV7Error, match="clean tracked worktree"):
+        validate_checkpoint_serialization_recovery_release(root)
+
+
+def test_checkpoint_serialization_recovery_accepts_crlf_checkout_by_git_blob_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _base, _implementation, seal, _release = (
+        _sealed_v7_checkpoint_serialization_recovery_fixture(tmp_path, monkeypatch)
+    )
+    record_path = root / V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+    sealed_bytes = _git_bytes(root, "show", f"{seal}:{record_path.name}")
+    record_path.write_bytes(sealed_bytes.replace(b"\n", b"\r\n"))
+    assert b"\r\n" in record_path.read_bytes()
+    _git(root, "add", "--", record_path.name)
+    assert _git(root, "rev-parse", f":{record_path.name}") == _git(
+        root, "rev-parse", f"{seal}:{record_path.name}"
+    )
+    assert _git(root, "status", "--porcelain", "--untracked-files=no") == ""
+
+    binding = validate_checkpoint_serialization_recovery_release(root)
+
+    assert binding["recovery_commit"] == seal
+    assert pilot_v7._git_blob_id(root, seal, record_path.name) == pilot_v7._git_blob_id(
+        root, "HEAD", record_path.name
     )

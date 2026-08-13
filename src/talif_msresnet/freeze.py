@@ -14,6 +14,13 @@ from .config import (
     load_protocol,
 )
 from .pilot_v7 import (
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE,
     V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS,
     V7_HEALTH_RECOVERY_ATTEMPT_PATH,
     V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
@@ -24,8 +31,8 @@ from .pilot_v7 import (
     V7_HEALTH_RECOVERY_PROTOCOL_HASH,
     V7_HEALTH_RECOVERY_RELEASE_RECORD,
     V7_HEALTH_RECOVERY_SCHEMA,
-    V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
     V7_HEALTH_RECOVERY_SEAL_COMMIT,
+    V7_HEALTH_RECOVERY_SPLIT_SOURCE_FINGERPRINT,
     V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS,
     V7_PILOT_DEVICE_RECOVERY_EXECUTION_DEVICE,
     V7_PILOT_DEVICE_RECOVERY_FROZEN_DEVICE,
@@ -94,6 +101,7 @@ V6_GATE_SOURCE_PATHS = frozenset(
 )
 V7_GATE_SOURCE_PATHS = frozenset(
     {
+        V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
         V7_HEALTH_RECOVERY_RELEASE_RECORD,
         V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
         "V7_MECHANISM_5090_RUNBOOK.md",
@@ -434,9 +442,15 @@ def verify_formal_freeze(
             repository = stored.get("repository")
             recovery = pilot_record.get("health_compatibility_recovery")
             device_recovery = pilot_record.get("device_compatibility_recovery")
+            serialization_recovery = pilot_record.get(
+                "checkpoint_serialization_recovery"
+            )
             recovery_source = gate_sources.get(V7_HEALTH_RECOVERY_RELEASE_RECORD)
             device_recovery_source = gate_sources.get(
                 V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD
+            )
+            serialization_recovery_source = gate_sources.get(
+                V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
             )
             expected_recovery_values = {
                 "schema": V7_HEALTH_RECOVERY_SCHEMA,
@@ -546,6 +560,97 @@ def verify_formal_freeze(
                 raise FreezeGateError(
                     "Protocol v7 freeze manifest has a malformed sealed pilot "
                     "device compatibility recovery binding"
+                )
+            expected_serialization_recovery = {
+                "schema": V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+                "base_device_recovery_seal_commit": (
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT
+                ),
+                "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+                "original_validation_path": (
+                    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION
+                ),
+                "original_validation_sha256": (
+                    V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+                ),
+                "recovery_output_path": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+                "protocol_hash": V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+                "allowed_container_path": (
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH
+                ),
+                "checkpoint_container_type": (
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE
+                ),
+                "json_container_type": (
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE
+                ),
+                "canonical_payload_must_match": True,
+                "execution_hash_must_match": True,
+                "scientific_hash_must_match": True,
+                "allowed_changed_paths": list(
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+                ),
+                "observed_changes": [
+                    f"M\t{path}"
+                    for path in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+                ],
+                "release_record": (
+                    V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+                ),
+                "tracked_clean": True,
+            }
+            if not isinstance(serialization_recovery, Mapping):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest has a malformed sealed checkpoint "
+                    "serialization compatibility recovery binding"
+                )
+            if pilot_record.get("recovery_validator_commit") != (
+                serialization_recovery.get("recovery_commit")
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest checkpoint serialization "
+                    "compatibility recovery validator commit does not match its seal"
+                )
+            if (
+                any(
+                    serialization_recovery.get(key) != value
+                    for key, value in expected_serialization_recovery.items()
+                )
+                or not isinstance(
+                    serialization_recovery.get("implementation_commit"), str
+                )
+                or len(serialization_recovery["implementation_commit"]) != 40
+                or not set(serialization_recovery["implementation_commit"])
+                <= _LOWER_HEX
+                or not isinstance(
+                    serialization_recovery.get("implementation_tree"), str
+                )
+                or len(serialization_recovery["implementation_tree"]) != 40
+                or not set(serialization_recovery["implementation_tree"])
+                <= _LOWER_HEX
+                or not _is_sha256(
+                    serialization_recovery.get("release_record_sha256")
+                )
+                or not _is_sha256(serialization_recovery.get("record_sha256"))
+                or not isinstance(serialization_recovery_source, Mapping)
+                or serialization_recovery_source.get("file_sha256")
+                != serialization_recovery.get("release_record_sha256")
+                or not isinstance(
+                    serialization_recovery.get("implementation_file_sha256"),
+                    Mapping,
+                )
+                or set(serialization_recovery["implementation_file_sha256"])
+                != set(V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS)
+                or any(
+                    not _is_sha256(value)
+                    for value in serialization_recovery[
+                        "implementation_file_sha256"
+                    ].values()
+                )
+            ):
+                raise FreezeGateError(
+                    "Protocol v7 freeze manifest has a malformed sealed checkpoint "
+                    "serialization compatibility recovery binding"
                 )
             required_hashes = (
                 "block_hash",

@@ -136,6 +136,30 @@ V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS: tuple[str, ...] = (
     "tests/test_validate_v5_pilot.py",
     "tests/test_validate_v7_pilot.py",
 )
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA = (
+    "ta-lif-msresnet-v7-checkpoint-serialization-recovery-release-v1"
+)
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD = (
+    "V7_CHECKPOINT_SERIALIZATION_COMPATIBILITY_RECOVERY_RELEASE.json"
+)
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT = (
+    "167474f1cf2b39a367f38a0789d88f5dd2819603"
+)
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH = "$.optimizer.milestones"
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE = "tuple"
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE = "list"
+V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS: tuple[str, ...] = (
+    "V7_MECHANISM_5090_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/validate_v7_pilot.py",
+    "scripts/validate_v7_source_release.py",
+    "src/talif_msresnet/freeze.py",
+    "src/talif_msresnet/pilot_v7.py",
+    "tests/test_v7_freeze_gates.py",
+    "tests/test_v7_health_gate.py",
+    "tests/test_v7_source_release.py",
+    "tests/test_validate_v7_pilot.py",
+)
 SIGNED_STATUS = (
     "Status: **AUTHORIZED - ACCOUNTABLE AUTHOR/USER APPROVAL RECORDED; "
     "PROTOCOL FROZEN**"
@@ -916,6 +940,187 @@ def validate_pilot_device_recovery_release(
     }
 
 
+def validate_checkpoint_serialization_recovery_release(
+    repository_root: str | Path,
+) -> dict[str, Any]:
+    """Validate the append-only seal for checkpoint/JSON container identity."""
+
+    root = Path(repository_root).resolve()
+    current_head = _require_full_commit(
+        _git_output(root, "rev-parse", "HEAD"), "V7 current Git commit"
+    )
+    record_path = root / V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+    record = _read_json(record_path, "V7 checkpoint serialization recovery record")
+    implementation_commit = _require_full_commit(
+        record.get("implementation_commit"),
+        "V7 checkpoint serialization implementation commit",
+    )
+    additions = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "log",
+            "HEAD",
+            "--format=%H",
+            "--diff-filter=A",
+            "--",
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
+        ).splitlines()
+        if line.strip()
+    )
+    if len(additions) != 1:
+        raise PilotV7Error(
+            "V7 checkpoint serialization recovery must have exactly one "
+            f"release-record introduction: observed={list(additions)}"
+        )
+    seal_commit = _require_full_commit(
+        additions[0], "V7 checkpoint serialization recovery seal commit"
+    )
+    if not _git_is_ancestor(root, seal_commit, current_head):
+        raise PilotV7Error(
+            "V7 checkpoint serialization recovery seal is not an ancestor of HEAD"
+        )
+    if _git_blob_id(
+        root, seal_commit, V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+    ) != _git_blob_id(
+        root, "HEAD", V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+    ):
+        raise PilotV7Error(
+            "V7 checkpoint serialization recovery record changed after sealing"
+        )
+    seal_parents = _git_output(
+        root, "rev-list", "--parents", "-n", "1", seal_commit
+    ).split()
+    if seal_parents != [seal_commit, implementation_commit]:
+        raise PilotV7Error(
+            "V7 checkpoint serialization seal must directly follow its implementation"
+        )
+    implementation_parents = _git_output(
+        root, "rev-list", "--parents", "-n", "1", implementation_commit
+    ).split()
+    if implementation_parents != [
+        implementation_commit,
+        V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT,
+    ]:
+        raise PilotV7Error(
+            "V7 checkpoint serialization implementation must directly follow "
+            "the sealed device recovery"
+        )
+    if _git_output(root, "status", "--porcelain", "--untracked-files=no"):
+        raise PilotV7Error(
+            "V7 checkpoint serialization recovery requires a clean tracked worktree"
+        )
+    implementation_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT,
+            implementation_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    expected_changes = tuple(
+        f"M\t{path}"
+        for path in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+    )
+    if implementation_changes != expected_changes:
+        raise PilotV7Error(
+            "V7 checkpoint serialization implementation delta is not the exact "
+            f"modification-only allowlist: observed={list(implementation_changes)} "
+            f"expected={list(expected_changes)}"
+        )
+    seal_changes = tuple(
+        line.strip()
+        for line in _git_output(
+            root,
+            "diff",
+            "--name-status",
+            "--find-renames",
+            implementation_commit,
+            seal_commit,
+        ).splitlines()
+        if line.strip()
+    )
+    if seal_changes != (
+        f"A\t{V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD}",
+    ):
+        raise PilotV7Error(
+            "V7 checkpoint serialization seal must add only its release record"
+        )
+    implementation_tree = _git_output(
+        root, "rev-parse", f"{implementation_commit}^{{tree}}"
+    )
+    expected_record = {
+        "schema": V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+        "base_device_recovery_seal_commit": (
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT
+        ),
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "original_validation_path": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+        "original_validation_sha256": (
+            V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+        ),
+        "recovery_output_path": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "protocol_hash": V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+        "allowed_container_path": V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
+        "checkpoint_container_type": (
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE
+        ),
+        "json_container_type": V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE,
+        "canonical_payload_must_match": True,
+        "execution_hash_must_match": True,
+        "scientific_hash_must_match": True,
+        "allowed_changed_paths": list(
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+        ),
+    }
+    mismatches = [
+        key for key, expected in expected_record.items() if record.get(key) != expected
+    ]
+    expected_keys = set(expected_record) | {
+        "implementation_file_sha256",
+        "record_sha256",
+    }
+    if set(record) != expected_keys:
+        mismatches.append("record_keys")
+    implementation_hashes = record.get("implementation_file_sha256")
+    if not isinstance(implementation_hashes, Mapping) or set(
+        implementation_hashes
+    ) != set(V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS):
+        mismatches.append("implementation_file_sha256")
+        implementation_hashes = {}
+    for relative in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS:
+        committed_sha256 = hashlib.sha256(
+            _git_bytes(root, "show", f"{implementation_commit}:{relative}")
+        ).hexdigest()
+        if implementation_hashes.get(relative) != committed_sha256:
+            mismatches.append(f"implementation_file_sha256.{relative}")
+    record_without_hash = dict(record)
+    record_sha256 = record_without_hash.pop("record_sha256", None)
+    if record_sha256 != stable_hash(record_without_hash):
+        mismatches.append("record_sha256")
+    if mismatches:
+        raise PilotV7Error(
+            "V7 checkpoint serialization record is not the sealed reviewed fix: "
+            + ", ".join(mismatches)
+        )
+    return {
+        **expected_record,
+        "recovery_commit": seal_commit,
+        "observed_changes": list(implementation_changes),
+        "implementation_file_sha256": dict(implementation_hashes),
+        "release_record": V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
+        "record_sha256": str(record["record_sha256"]),
+        "release_record_sha256": sha256_file(record_path),
+        "tracked_clean": True,
+    }
+
+
 def _validate_recovered_current_source(
     *,
     repository_root: Path,
@@ -949,6 +1154,22 @@ def _validate_recovered_current_source(
     )
     if not isinstance(device_hashes, Mapping):
         raise PilotV7Error("V7 device recovery implementation hashes are malformed")
+    serialization_recovery: Mapping[str, Any] | None = None
+    if (
+        repository_root / V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+    ).is_file():
+        serialization_recovery = validate_checkpoint_serialization_recovery_release(
+            repository_root
+        )
+    serialization_hashes = (
+        serialization_recovery.get("implementation_file_sha256")
+        if isinstance(serialization_recovery, Mapping)
+        else {}
+    )
+    if not isinstance(serialization_hashes, Mapping):
+        raise PilotV7Error(
+            "V7 checkpoint serialization recovery implementation hashes are malformed"
+        )
     for relative in V7_HEALTH_RUNTIME_SOURCE_PATHS:
         base_sha256 = hashlib.sha256(
             _git_bytes(
@@ -961,11 +1182,14 @@ def _validate_recovered_current_source(
             raise PilotV7Error(
                 f"V7 consumed health source is not bound to its base commit: {relative}"
             )
-        expected = device_hashes.get(
+        expected = serialization_hashes.get(
             relative,
-            implementation_sha256[relative]
-            if relative in implementation_sha256
-            else old_runtime[relative],
+            device_hashes.get(
+                relative,
+                implementation_sha256[relative]
+                if relative in implementation_sha256
+                else old_runtime[relative],
+            ),
         )
         if current_runtime.get(relative) != expected:
             raise PilotV7Error(

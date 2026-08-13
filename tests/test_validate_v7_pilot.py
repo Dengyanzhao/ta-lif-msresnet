@@ -437,6 +437,9 @@ def test_device_recovery_binds_both_checkpoint_execution_identities(
 ) -> None:
     protocol, config, artifact = _v7_recovery_artifact_config(tmp_path)
     execution_hash = stable_hash(artifact)
+    resolved_artifact = json.loads(json.dumps(artifact))
+    assert type(artifact["optimizer"]["milestones"]) is tuple
+    assert type(resolved_artifact["optimizer"]["milestones"]) is list
     checkpoint = {
         "config": copy.deepcopy(artifact),
         "execution_hash": execution_hash,
@@ -453,7 +456,7 @@ def test_device_recovery_binds_both_checkpoint_execution_identities(
             protocol=protocol,
             repository_root=tmp_path,
             expected_config=config,
-            reference_raw=artifact,
+            reference_raw=resolved_artifact,
             reference_execution_hash=execution_hash,
         ) == []
 
@@ -465,10 +468,133 @@ def test_device_recovery_binds_both_checkpoint_execution_identities(
         protocol=protocol,
         repository_root=tmp_path,
         expected_config=config,
-        reference_raw=artifact,
+        reference_raw=resolved_artifact,
         reference_execution_hash=execution_hash,
     )
     assert any("does not hash its raw config" in failure for failure in failures)
+
+
+def test_checkpoint_serialization_equivalence_is_exactly_milestones_tuple_to_list(
+    tmp_path: Path,
+) -> None:
+    protocol, config, artifact = _v7_recovery_artifact_config(tmp_path)
+    resolved = json.loads(json.dumps(artifact))
+    execution_hash = stable_hash(artifact)
+
+    assert validator._checkpoint_milestones_container_equivalent(artifact, resolved)
+
+    changed_value = copy.deepcopy(artifact)
+    changed_value["optimizer"]["milestones"] = (
+        *changed_value["optimizer"]["milestones"][:-1],
+        changed_value["optimizer"]["milestones"][-1] + 1,
+    )
+    assert not validator._checkpoint_milestones_container_equivalent(
+        changed_value, resolved
+    )
+
+    changed_elsewhere = copy.deepcopy(artifact)
+    changed_elsewhere["analysis"]["unexpected_tuple"] = (1, 2)
+    resolved_elsewhere = copy.deepcopy(resolved)
+    resolved_elsewhere["analysis"]["unexpected_tuple"] = [1, 2]
+    assert not validator._checkpoint_milestones_container_equivalent(
+        changed_elsewhere, resolved_elsewhere
+    )
+
+    run_manifest_failures = validator._stored_recovery_execution_identity_failures(
+        artifact,
+        execution_hash,
+        label="run_manifest.json",
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+        reference_raw=resolved,
+        reference_execution_hash=execution_hash,
+    )
+    assert run_manifest_failures == [
+        "run_manifest.json raw config differs from resolved_config.json"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_container", "resolved_container"),
+    [
+        (list, list),
+        (tuple, tuple),
+        (list, tuple),
+        (set, list),
+    ],
+)
+def test_checkpoint_serialization_rejects_every_other_container_direction(
+    tmp_path: Path,
+    checkpoint_container,
+    resolved_container,
+) -> None:
+    _protocol, _config, artifact = _v7_recovery_artifact_config(tmp_path)
+    checkpoint = copy.deepcopy(artifact)
+    resolved = json.loads(json.dumps(artifact))
+    values = artifact["optimizer"]["milestones"]
+    checkpoint["optimizer"]["milestones"] = checkpoint_container(values)
+    resolved["optimizer"]["milestones"] = resolved_container(values)
+
+    assert not validator._checkpoint_milestones_container_equivalent(
+        checkpoint, resolved
+    )
+
+
+@pytest.mark.parametrize("missing_from", ["checkpoint", "resolved"])
+def test_checkpoint_serialization_requires_the_exact_milestones_path(
+    tmp_path: Path, missing_from: str
+) -> None:
+    _protocol, _config, artifact = _v7_recovery_artifact_config(tmp_path)
+    checkpoint = copy.deepcopy(artifact)
+    resolved = json.loads(json.dumps(artifact))
+    target = checkpoint if missing_from == "checkpoint" else resolved
+    target["optimizer"].pop("milestones")
+
+    assert not validator._checkpoint_milestones_container_equivalent(
+        checkpoint, resolved
+    )
+
+
+def test_checkpoint_serialization_is_type_strict_outside_the_allowed_path(
+    tmp_path: Path,
+) -> None:
+    _protocol, _config, artifact = _v7_recovery_artifact_config(tmp_path)
+    checkpoint = copy.deepcopy(artifact)
+    resolved = json.loads(json.dumps(artifact))
+    checkpoint["analysis"]["test_access"] = True
+    resolved["analysis"]["test_access"] = 1
+
+    assert not validator._checkpoint_milestones_container_equivalent(
+        checkpoint, resolved
+    )
+
+
+def test_checkpoint_entry_requires_tuple_to_list_even_when_raw_payloads_match(
+    tmp_path: Path,
+) -> None:
+    protocol, config, artifact = _v7_recovery_artifact_config(tmp_path)
+    checkpoint_raw = json.loads(json.dumps(artifact))
+    execution_hash = stable_hash(checkpoint_raw)
+    path = tmp_path / "list_checkpoint.pt"
+    torch.save(
+        {"config": checkpoint_raw, "execution_hash": execution_hash},
+        path,
+    )
+
+    failures = validator._checkpoint_recovery_execution_identity_failures(
+        path,
+        label=path.name,
+        protocol=protocol,
+        repository_root=tmp_path,
+        expected_config=config,
+        reference_raw=copy.deepcopy(checkpoint_raw),
+        reference_execution_hash=execution_hash,
+    )
+
+    assert failures == [
+        "list_checkpoint.pt raw config differs from resolved_config.json"
+    ]
 
 
 def test_device_recovery_requires_exactly_one_trainer_start_on_cuda_zero(

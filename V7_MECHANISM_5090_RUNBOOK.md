@@ -428,7 +428,10 @@ echo "V7_FORMAL_FREEZE_EXIT=$rc"
 本节只适用于这一次已完成全部六个 run、原始
 `results/pilot/v7_mechanism/validation.json` 的 SHA-256 为
 `90c90f1b23146f714b5ac72ba35b736f8208f5cd20238c3ff6ebf4c7ea23d77f`、且唯一
-完整性问题是冻结 `runtime.device=auto` 与历史执行记录 `cuda:0` 不一致的事故。
+完整性问题是冻结 `runtime.device=auto` 与历史执行记录 `cuda:0` 不一致，以及 checkpoint
+原始配置在唯一允许路径 `$.optimizer.milestones` 使用 `tuple`、JSON 使用同值 `list` 的
+序列化差异。恢复器必须逐 checkpoint 证明 canonical payload、execution hash 和 scientific
+hash 均一致；任何其他路径、类型、方向或数值差异都必须失败关闭。
 绝不重跑 health、pilot 或验证链；绝不修改原始 `validation.json`、checkpoint、manifest
 或训练日志。此命令只创建不可报告的恢复侧车文件，侧车本身不得进入论文结果。
 

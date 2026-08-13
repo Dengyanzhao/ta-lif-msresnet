@@ -17,6 +17,13 @@ import talif_msresnet.freeze as freeze_module
 from talif_msresnet.config_v7 import V7_ACTIVE_CONDITIONS, V7_FORMAL_SEEDS
 from talif_msresnet.freeze import FreezeGateError
 from talif_msresnet.pilot_v7 import (
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE,
+    V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE,
     V7_HEALTH_RECOVERY_ALLOWED_CHANGED_PATHS,
     V7_HEALTH_RECOVERY_ATTEMPT_PATH,
     V7_HEALTH_RECOVERY_ATTEMPT_SHA256,
@@ -112,6 +119,48 @@ def _v7_device_recovery(*, recovery_commit: str = "f" * 40) -> dict[str, Any]:
             path: "9" * 64 for path in V7_PILOT_DEVICE_RECOVERY_ALLOWED_CHANGED_PATHS
         },
         "release_record": V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
+        "record_sha256": "c" * 64,
+        "release_record_sha256": "b" * 64,
+        "tracked_clean": True,
+    }
+
+
+def _v7_serialization_recovery(*, recovery_commit: str = "1" * 40) -> dict[str, Any]:
+    return {
+        "schema": V7_CHECKPOINT_SERIALIZATION_RECOVERY_SCHEMA,
+        "base_device_recovery_seal_commit": (
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_BASE_SEAL_COMMIT
+        ),
+        "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
+        "implementation_commit": "d" * 40,
+        "implementation_tree": "a" * 40,
+        "recovery_commit": recovery_commit,
+        "original_validation_path": V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION,
+        "original_validation_sha256": (
+            V7_PILOT_DEVICE_RECOVERY_ORIGINAL_VALIDATION_SHA256
+        ),
+        "recovery_output_path": V7_PILOT_DEVICE_RECOVERY_OUTPUT,
+        "protocol_hash": V7_PILOT_DEVICE_RECOVERY_PROTOCOL_HASH,
+        "allowed_container_path": V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_PATH,
+        "checkpoint_container_type": (
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_SOURCE_TYPE
+        ),
+        "json_container_type": V7_CHECKPOINT_SERIALIZATION_RECOVERY_TARGET_TYPE,
+        "canonical_payload_must_match": True,
+        "execution_hash_must_match": True,
+        "scientific_hash_must_match": True,
+        "allowed_changed_paths": list(
+            V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+        ),
+        "observed_changes": [
+            f"M\t{path}"
+            for path in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+        ],
+        "implementation_file_sha256": {
+            path: "9" * 64
+            for path in V7_CHECKPOINT_SERIALIZATION_RECOVERY_ALLOWED_CHANGED_PATHS
+        },
+        "release_record": V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
         "record_sha256": "c" * 64,
         "release_record_sha256": "b" * 64,
         "tracked_clean": True,
@@ -245,6 +294,7 @@ def _v7_device_recovery_sidecar(
     recovered: dict[str, Any], legacy: dict[str, Any]
 ) -> dict[str, Any]:
     device_recovery = _v7_device_recovery()
+    serialization_recovery = _v7_serialization_recovery()
     return {
         "schema_version": 1,
         "artifact_class": (
@@ -260,8 +310,9 @@ def _v7_device_recovery_sidecar(
         "protocol_hash": recovered["protocol_hash"],
         "acceptance_hash": recovered["acceptance_hash"],
         "pilot_execution_commit": V7_HEALTH_RECOVERY_SEAL_COMMIT,
-        "recovery_validator_commit": device_recovery["recovery_commit"],
+        "recovery_validator_commit": serialization_recovery["recovery_commit"],
         "release_delta": device_recovery,
+        "checkpoint_serialization_recovery": serialization_recovery,
         "recovery_validator": {
             "path": "scripts/validate_v7_pilot.py",
             "sha256": "a" * 64,
@@ -344,6 +395,7 @@ def _patch_v7_device_recovery_bindings(
     recovered: dict[str, Any],
     device_recovery: dict[str, Any] | None = None,
     health_recovery: dict[str, Any] | None = None,
+    serialization_recovery: dict[str, Any] | None = None,
 ) -> None:
     validation_path = (
         project / protocol["pilot_acceptance"]["validation_output"]
@@ -368,6 +420,12 @@ def _patch_v7_device_recovery_bindings(
         tool,
         "validate_pilot_device_recovery_release",
         lambda *_args, **_kwargs: device_recovery or _v7_device_recovery(),
+    )
+    monkeypatch.setattr(
+        tool,
+        "validate_checkpoint_serialization_recovery_release",
+        lambda *_args, **_kwargs: serialization_recovery
+        or _v7_serialization_recovery(),
     )
 
 
@@ -409,6 +467,12 @@ def test_v7_pilot_acceptance_is_revalidated_and_bound(
     ]
     assert bound["artifact_class"] == sidecar["artifact_class"]
     assert bound["device_compatibility_recovery"] == sidecar["release_delta"]
+    assert bound["checkpoint_serialization_recovery"] == sidecar[
+        "checkpoint_serialization_recovery"
+    ]
+    assert bound["recovery_validator_commit"] == sidecar[
+        "recovery_validator_commit"
+    ]
     assert set(bound["datasets"]) == {"cifar100"}
 
 
@@ -473,11 +537,59 @@ def test_v7_pilot_acceptance_rejects_unsealed_recovery_binding(
         tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
 
 
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda sidecar: sidecar.pop("checkpoint_serialization_recovery"),
+            "checkpoint serialization recovery differs from the sealed release",
+        ),
+        (
+            lambda sidecar: sidecar["checkpoint_serialization_recovery"].update(
+                {"record_sha256": "0" * 64}
+            ),
+            "checkpoint serialization recovery differs from the sealed release",
+        ),
+        (
+            lambda sidecar: sidecar.update({"recovery_validator_commit": "2" * 40}),
+            "recovery validator commit is not the final serialization seal",
+        ),
+    ],
+)
+def test_v7_pilot_acceptance_rejects_invalid_serialization_recovery_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+    message: str,
+) -> None:
+    protocol = _v7_protocol()
+    project, protocol_path, report, sidecar = _write_v7_validation_fixture(
+        tmp_path, protocol
+    )
+    mutate(sidecar)
+    recovery_path = project / V7_PILOT_DEVICE_RECOVERY_OUTPUT
+    recovery_path.write_text(
+        json.dumps(sidecar, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _patch_v7_device_recovery_bindings(
+        monkeypatch,
+        project=project,
+        protocol=protocol,
+        recovered=report,
+    )
+
+    with pytest.raises(tool.FreezeManifestError, match=message):
+        tool._validate_v7_pilot_acceptance(protocol, protocol_path, project)
+
+
 def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
     protocol_hash = tool._stable_hash(protocol)
     environment = "e" * 64
     recovery = _v7_recovery()
     device_recovery = _v7_device_recovery()
+    serialization_recovery = _v7_serialization_recovery()
     pilot = {
         "artifact_class": (
             "NON_REPORTABLE_V7_PILOT_VALIDATION_DEVICE_COMPATIBILITY_RECOVERY"
@@ -497,6 +609,8 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
         "validator": {"path": "scripts/validate_v7_pilot.py", "sha256": "b" * 64},
         "health_compatibility_recovery": recovery,
         "device_compatibility_recovery": device_recovery,
+        "checkpoint_serialization_recovery": serialization_recovery,
+        "recovery_validator_commit": serialization_recovery["recovery_commit"],
         "datasets": {
             "cifar100": {
                 "status": "PASS",
@@ -543,6 +657,7 @@ def _v7_freeze_record(protocol: dict[str, Any]) -> dict[str, Any]:
                         "scripts/validate_v7_pilot.py",
                         V7_HEALTH_RECOVERY_RELEASE_RECORD,
                         V7_PILOT_DEVICE_RECOVERY_RELEASE_RECORD,
+                        V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD,
                     }
                     else "c" * 64
                 ),
@@ -653,6 +768,30 @@ def test_runtime_v7_formal_gate_requires_exact_pilot_matrix_and_sources(
             ].update({"file_sha256": "0" * 64}),
             "device compatibility recovery",
         ),
+        (
+            lambda stored: stored["pilot_validation"].pop(
+                "checkpoint_serialization_recovery"
+            ),
+            "checkpoint serialization compatibility recovery",
+        ),
+        (
+            lambda stored: stored["pilot_validation"][
+                "checkpoint_serialization_recovery"
+            ].update({"allowed_container_path": "$.optimizer.gamma"}),
+            "checkpoint serialization compatibility recovery",
+        ),
+        (
+            lambda stored: stored["gate_sources"][
+                V7_CHECKPOINT_SERIALIZATION_RECOVERY_RELEASE_RECORD
+            ].update({"file_sha256": "0" * 64}),
+            "checkpoint serialization compatibility recovery",
+        ),
+        (
+            lambda stored: stored["pilot_validation"].update(
+                {"recovery_validator_commit": "2" * 40}
+            ),
+            "recovery validator commit",
+        ),
     ],
 )
 def test_runtime_v7_formal_gate_fails_closed(
@@ -728,3 +867,64 @@ def test_runtime_v7_rejects_missing_or_unverifiable_freeze(
 
 def test_v7_manifest_and_runtime_gate_share_the_complete_source_set() -> None:
     assert set(tool.V7_REQUIRED_SOURCE_PATHS) == freeze_module.V7_GATE_SOURCE_PATHS
+
+
+def test_v7_build_manifest_rejects_non_ancestor_serialization_seal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = _v7_protocol()
+    artifacts = protocol["artifact_paths"]
+    protocol_path = tmp_path / artifacts["protocol"]
+    signoff_path = tmp_path / artifacts["signoff"]
+    matrix_dir = tmp_path / artifacts["formal_matrix"]
+    output_path = tmp_path / artifacts["freeze_manifest"]
+    protocol_path.parent.mkdir(parents=True)
+    matrix_dir.mkdir(parents=True)
+    protocol_path.write_text("protocol_version: 7\n", encoding="utf-8")
+    signoff_path.write_text("signed\n", encoding="utf-8")
+
+    pilot_binding = _v7_freeze_record(protocol)["pilot_validation"]
+    formal_commit = "f" * 40
+    serialization_commit = pilot_binding[
+        "checkpoint_serialization_recovery"
+    ]["recovery_commit"]
+
+    monkeypatch.setattr(tool, "load_protocol", lambda _path: protocol)
+    monkeypatch.setattr(tool, "_validate_protocol_status", lambda _protocol: {})
+    monkeypatch.setattr(tool, "_validate_signoff", lambda *_args: None)
+    monkeypatch.setattr(
+        tool,
+        "_validate_v7_pilot_acceptance",
+        lambda *_args: pilot_binding,
+    )
+    monkeypatch.setattr(tool, "_git_repository", lambda _root: tmp_path)
+    monkeypatch.setattr(
+        tool,
+        "_resolve_commit",
+        lambda *_args, **_kwargs: formal_commit,
+    )
+
+    def fake_git(_root: Path, arguments, **_kwargs):
+        assert arguments[0] == "merge-base"
+        if arguments[1] == serialization_commit:
+            return "0" * 40
+        return arguments[1]
+
+    monkeypatch.setattr(tool, "_git", fake_git)
+
+    with pytest.raises(
+        tool.FreezeManifestError,
+        match="checkpoint serialization recovery seal must be an ancestor",
+    ):
+        tool.build_manifest(
+            project_root=tmp_path,
+            protocol_path=protocol_path,
+            signoff_path=signoff_path,
+            matrix_dir=matrix_dir,
+            output_path=output_path,
+            freeze_commit=formal_commit,
+            repository_url="https://example.invalid/ta-lif-msresnet.git",
+            created_at="2026-08-13T12:00:00+08:00",
+            require_creation_state=False,
+        )
