@@ -1,0 +1,42 @@
+{
+  "schema": "ta-lif-msresnet-v7-checkpoint-serialization-recovery-release-v1",
+  "base_device_recovery_seal_commit": "167474f1cf2b39a367f38a0789d88f5dd2819603",
+  "pilot_execution_commit": "9786dd748f95c79dca269b1eb4e45826c62c655d",
+  "implementation_commit": "4af8ac6189e48696d2c0b95cff8e56c7e90c2e8a",
+  "implementation_tree": "fee49599c9b2cc7e1074c0239fa080e4c8b5aacb",
+  "original_validation_path": "results/pilot/v7_mechanism/validation.json",
+  "original_validation_sha256": "90c90f1b23146f714b5ac72ba35b736f8208f5cd20238c3ff6ebf4c7ea23d77f",
+  "recovery_output_path": "results/pilot/v7_mechanism/validation_device_recovery.json",
+  "protocol_hash": "ce8240e28147a87ee76a3953f8097613ecc33d683339ad66d9e73a126104265c",
+  "allowed_container_path": "$.optimizer.milestones",
+  "checkpoint_container_type": "tuple",
+  "json_container_type": "list",
+  "canonical_payload_must_match": true,
+  "execution_hash_must_match": true,
+  "scientific_hash_must_match": true,
+  "allowed_changed_paths": [
+    "V7_MECHANISM_5090_RUNBOOK.md",
+    "scripts/create_freeze_manifest.py",
+    "scripts/validate_v7_pilot.py",
+    "scripts/validate_v7_source_release.py",
+    "src/talif_msresnet/freeze.py",
+    "src/talif_msresnet/pilot_v7.py",
+    "tests/test_v7_freeze_gates.py",
+    "tests/test_v7_health_gate.py",
+    "tests/test_v7_source_release.py",
+    "tests/test_validate_v7_pilot.py"
+  ],
+  "implementation_file_sha256": {
+    "V7_MECHANISM_5090_RUNBOOK.md": "b2b7a7fc06a7feaf7bcc80b11c258cca68e556623fc1c5705e0ec01fe63e51b5",
+    "scripts/create_freeze_manifest.py": "ee6d1ef6cb7f99c8429fdf16b95d0959d30205229855613c84baa0dd5a5f0afb",
+    "scripts/validate_v7_pilot.py": "60fc94ae16d53734142cb9e12c103aa3f9ee34f4e5fbed3ab72bbc88b8e9a063",
+    "scripts/validate_v7_source_release.py": "0145c0a45e89e2c656602dc6f26f0f981fdf0b60078f0aad6f081f464c3aa541",
+    "src/talif_msresnet/freeze.py": "58eb248c5e43d350b8d64a0190cc3c70687c0b0cfdcfc086403a1c895a2072fe",
+    "src/talif_msresnet/pilot_v7.py": "bd52ac64e8c1a74ee96660870a31f27756d882b0a18e03ded7e19cb8f21dbce4",
+    "tests/test_v7_freeze_gates.py": "336dbb91f26ce2f29b6087cd6ef5e55e64d406b9028290f7c5fcd0306a63f2c5",
+    "tests/test_v7_health_gate.py": "36e6be0f7f6adbc356e8ab5ff59264513646762c4496f87f9df8df0d086a22d2",
+    "tests/test_v7_source_release.py": "dce44bb53f3953be7da4370a90c74eebd75d4a386b4de20c6a1a0cb94f6f18de",
+    "tests/test_validate_v7_pilot.py": "b1e2403e93b36953545ae6d31e802da12113fb118250164dc073df168811fd3a"
+  },
+  "record_sha256": "1f8ab1937900c140fe9b30a422ea2121f78fabe5af1bccb482d2c6a01da3c144"
+}
