@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
+from scripts import export_v7_validation_batch
 from scripts.run_v7_benchmarks import _parameter_measurement
 from talif_msresnet import benchmark_v7
 from talif_msresnet.benchmark_v7 import (
@@ -25,6 +27,7 @@ from talif_msresnet.config_v7 import (
     V7_BENCHMARK_CONTRACT,
     V7_OPERATION_MODE_BY_CONDITION,
 )
+from talif_msresnet.diagnostics import representative_batch_sha256
 from talif_msresnet.utils import sha256_file, stable_hash
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +43,69 @@ def test_v7_parameter_measurement_adapts_canonical_model_report() -> None:
     assert _parameter_measurement(
         {"total_parameters": 123, "trainable_parameters": 117}
     ) == {"total": 123, "trainable": 117}
+
+
+def test_v7_batch_compatibility_rebind_preserves_tensor_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = torch.arange(24, dtype=torch.float32).reshape(2, 3, 2, 2)
+    targets = torch.tensor([1, 2], dtype=torch.long)
+    content_hash = representative_batch_sha256(inputs, targets)
+    output = tmp_path / "validation_batch.pt"
+    old_metadata = {
+        "git_commit": "a" * 40,
+        "freeze_manifest_sha256": "b" * 64,
+        "schema": "fixture",
+    }
+    torch.save({"inputs": inputs, "targets": targets, "metadata": old_metadata}, output)
+    old_file_hash = sha256_file(output)
+    monkeypatch.setattr(
+        export_v7_validation_batch, "V7_BATCH_RECOVERY_BASE_COMMIT", "a" * 40
+    )
+    monkeypatch.setattr(
+        export_v7_validation_batch,
+        "V7_BATCH_RECOVERY_BASE_FREEZE_SHA256",
+        "b" * 64,
+    )
+    monkeypatch.setattr(
+        export_v7_validation_batch, "V7_BATCH_RECOVERY_BASE_FILE_SHA256", old_file_hash
+    )
+    monkeypatch.setattr(
+        export_v7_validation_batch,
+        "V7_BATCH_RECOVERY_CONTENT_SHA256",
+        content_hash,
+    )
+    expected = dict(old_metadata)
+    expected["git_commit"] = "c" * 40
+    expected["freeze_manifest_sha256"] = "d" * 64
+    sidecar = tmp_path / "validation_batch_compatibility_recovery.json"
+
+    sidecar.write_text("existing", encoding="utf-8")
+    with pytest.raises(export_v7_validation_batch.V7BatchExportError, match="sidecar exists"):
+        export_v7_validation_batch._rebind_existing_batch(
+            output,
+            expected_metadata=expected,
+            expected_batch_hash=content_hash,
+            sidecar_path=sidecar,
+        )
+    assert sha256_file(output) == old_file_hash
+    sidecar.unlink()
+
+    assert export_v7_validation_batch._rebind_existing_batch(
+        output,
+        expected_metadata=expected,
+        expected_batch_hash=content_hash,
+        sidecar_path=sidecar,
+    )
+    payload = torch.load(output, map_location="cpu", weights_only=False)
+    assert torch.equal(payload["inputs"], inputs)
+    assert torch.equal(payload["targets"], targets)
+    assert payload["metadata"]["git_commit"] == "c" * 40
+    assert payload["metadata"]["freeze_manifest_sha256"] == "d" * 64
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["batch_content_sha256"] == content_hash
+    assert record["base_batch_file_sha256"] == old_file_hash
+    assert record["rebound_batch_file_sha256"] == sha256_file(output)
 
 
 def _hardware() -> dict[str, str]:

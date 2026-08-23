@@ -11,7 +11,7 @@ training seeds, checkpoints, validation split, or test-data boundary.
 - Formal training release commit: `b780b38322b491f849592d71814b7eb44de16948`
 - Failed benchmark log: `/hy-tmp/v7-benchmark.log`
 - Failed benchmark exit sidecar: `/hy-tmp/v7-benchmark.exit`
-- Fixed validation batch file SHA-256: `cf1557a2192d337d9f01f18c85c190fd4ad98b8eb750bde0b2fe80150597906f`
+- First-attempt validation batch file SHA-256: `cf1557a2192d337d9f01f18c85c190fd4ad98b8eb750bde0b2fe80150597906f`
 - Fixed validation batch content SHA-256: `c71537580ee9f8d17f7d66d85027f73691f12a533fd87379bf268d28aa9f3869`
 
 The benchmark stopped at the first checkpoint with `KeyError: 'total'` while
@@ -34,6 +34,15 @@ trainable_parameters -> measurements.parameters.trainable
 This correction is evaluator-only and is applied after formal training. The
 formal checkpoints remain bound to the original training release and are not
 retrained or replaced.
+
+Because the formal freeze manifest must be regenerated for the recovery commit,
+the existing validation batch is allowed one sealed metadata rebind after the
+new freeze is verified. Only `git_commit` and `freeze_manifest_sha256` may
+change. The input tensors, validation split, protocol hash, configuration
+hashes, and content SHA-256 remain unchanged. The exporter writes
+`results/benchmark/v7_mechanism/validation_batch_compatibility_recovery.json`
+with the old and rebound file hashes; this sidecar is non-reportable audit
+evidence.
 
 ## Verification
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +36,37 @@ from talif_msresnet.diagnostics import representative_batch_sha256  # noqa: E402
 from talif_msresnet.freeze import verify_formal_freeze  # noqa: E402
 from talif_msresnet.pathing import artifact_path_reference  # noqa: E402
 from talif_msresnet.preflight import check_protocol  # noqa: E402
-from talif_msresnet.utils import atomic_torch_save, sha256_file, utc_now  # noqa: E402
+from talif_msresnet.utils import (  # noqa: E402
+    atomic_torch_save,
+    atomic_write_json,
+    sha256_file,
+    stable_hash,
+    utc_now,
+)
 
 
 class V7BatchExportError(RuntimeError):
     """Raised before any V7 benchmark input can be accepted."""
+
+
+# The first benchmark attempt was made before the evaluator-only recovery
+# commit.  The tensors are immutable; only these two provenance fields may be
+# rebound after the new formal freeze is created.
+V7_BATCH_RECOVERY_BASE_COMMIT = "b780b38322b491f849592d71814b7eb44de16948"
+V7_BATCH_RECOVERY_BASE_FREEZE_SHA256 = (
+    "c2c596e14a4f4144bec1d5f12cc0bcf2020f60eca463712559dc3e1658b752e0"
+)
+V7_BATCH_RECOVERY_BASE_FILE_SHA256 = (
+    "cf1557a2192d337d9f01f18c85c190fd4ad98b8eb750bde0b2fe80150597906f"
+)
+V7_BATCH_RECOVERY_CONTENT_SHA256 = (
+    "c71537580ee9f8d17f7d66d85027f73691f12a533fd87379bf268d28aa9f3869"
+)
+V7_BATCH_RECOVERY_SIDECAR = "validation_batch_compatibility_recovery.json"
+V7_BATCH_RECOVERY_ALLOWED_METADATA_PATHS = (
+    "$.git_commit",
+    "$.freeze_manifest_sha256",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,11 +129,109 @@ def _existing_is_identical(
     observed = dict(metadata)
     expected = dict(expected_metadata)
     observed.pop("created_at", None)
+    observed.pop("compatibility_recovery", None)
     expected.pop("created_at", None)
     return (
         observed == expected
         and representative_batch_sha256(inputs, targets) == expected_batch_hash
     )
+
+
+def _rebind_existing_batch(
+    output: Path,
+    *,
+    expected_metadata: dict[str, Any],
+    expected_batch_hash: str,
+    sidecar_path: Path,
+) -> bool:
+    """Rebind only evaluator provenance on the sealed first-attempt batch.
+
+    The function fails closed unless the original file hash, content hash,
+    source commit, freeze hash, and every non-allowed metadata field match the
+    known first benchmark attempt.  Tensor values are loaded and saved
+    unchanged; no dataset loader is used for this recovery write.
+    """
+
+    try:
+        payload = torch.load(output, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(output, map_location="cpu")
+    if not isinstance(payload, Mapping):
+        return False
+    metadata = payload.get("metadata")
+    inputs = payload.get("inputs")
+    targets = payload.get("targets")
+    if not isinstance(metadata, Mapping) or not isinstance(inputs, torch.Tensor) or not isinstance(
+        targets, torch.Tensor
+    ):
+        return False
+    observed = dict(metadata)
+    if sha256_file(output) != V7_BATCH_RECOVERY_BASE_FILE_SHA256:
+        return False
+    content_hash = representative_batch_sha256(inputs, targets)
+    if content_hash != V7_BATCH_RECOVERY_CONTENT_SHA256 or content_hash != expected_batch_hash:
+        return False
+    if observed.get("git_commit") != V7_BATCH_RECOVERY_BASE_COMMIT:
+        return False
+    if observed.get("freeze_manifest_sha256") != V7_BATCH_RECOVERY_BASE_FREEZE_SHA256:
+        return False
+
+    comparable_observed = dict(observed)
+    comparable_expected = dict(expected_metadata)
+    for value in (comparable_observed, comparable_expected):
+        value.pop("created_at", None)
+        value.pop("compatibility_recovery", None)
+    differences = {
+        key
+        for key in set(comparable_observed) | set(comparable_expected)
+        if comparable_observed.get(key) != comparable_expected.get(key)
+    }
+    allowed = {path[2:] for path in V7_BATCH_RECOVERY_ALLOWED_METADATA_PATHS}
+    if differences != allowed:
+        return False
+
+    if sidecar_path.exists():
+        raise V7BatchExportError(
+            "V7 batch compatibility sidecar exists while the batch still has the "
+            "pre-recovery file identity"
+        )
+
+    rebound = dict(observed)
+    rebound["git_commit"] = expected_metadata["git_commit"]
+    rebound["freeze_manifest_sha256"] = expected_metadata["freeze_manifest_sha256"]
+    atomic_torch_save(output, {"inputs": inputs, "targets": targets, "metadata": rebound})
+    new_file_sha256 = sha256_file(output)
+    record = {
+        "schema": "ta-lif-msresnet-v7-validation-batch-compatibility-recovery-v1",
+        "artifact_class": "NON_REPORTABLE_V7_VALIDATION_BATCH_METADATA_REBIND",
+        "status": "PASS",
+        "pass": True,
+        "test_data_accessed": False,
+        "base_commit": V7_BATCH_RECOVERY_BASE_COMMIT,
+        "recovery_commit": expected_metadata["git_commit"],
+        "base_freeze_manifest_sha256": V7_BATCH_RECOVERY_BASE_FREEZE_SHA256,
+        "recovery_freeze_manifest_sha256": expected_metadata["freeze_manifest_sha256"],
+        "base_batch_file_sha256": V7_BATCH_RECOVERY_BASE_FILE_SHA256,
+        "rebound_batch_file_sha256": new_file_sha256,
+        "batch_content_sha256": content_hash,
+        "allowed_metadata_paths": list(V7_BATCH_RECOVERY_ALLOWED_METADATA_PATHS),
+        "old_metadata": {
+            "git_commit": V7_BATCH_RECOVERY_BASE_COMMIT,
+            "freeze_manifest_sha256": V7_BATCH_RECOVERY_BASE_FREEZE_SHA256,
+        },
+        "new_metadata": {
+            "git_commit": expected_metadata["git_commit"],
+            "freeze_manifest_sha256": expected_metadata["freeze_manifest_sha256"],
+        },
+    }
+    record["record_sha256"] = stable_hash(record)
+    atomic_write_json(sidecar_path, record)
+    print(f"V7_VALIDATION_BATCH_COMPATIBILITY_REBOUND={output}")
+    print(f"V7_VALIDATION_BATCH_BASE_SHA256={V7_BATCH_RECOVERY_BASE_FILE_SHA256}")
+    print(f"V7_VALIDATION_BATCH_REBOUND_SHA256={new_file_sha256}")
+    print(f"V7_VALIDATION_BATCH_CONTENT_SHA256={content_hash}")
+    print(f"V7_VALIDATION_BATCH_RECOVERY_SIDECAR={sidecar_path}")
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -209,6 +334,13 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 print(f"V7_VALIDATION_BATCH_REUSED={output}")
                 print(f"V7_VALIDATION_BATCH_SHA256={sha256_file(output)}")
+                return 0
+            if _rebind_existing_batch(
+                output,
+                expected_metadata=metadata,
+                expected_batch_hash=batch_hash,
+                sidecar_path=output.parent / V7_BATCH_RECOVERY_SIDECAR,
+            ):
                 return 0
             raise V7BatchExportError("Existing V7 validation batch differs; refusing overwrite")
         atomic_torch_save(output, {"inputs": inputs, "targets": targets, "metadata": metadata})

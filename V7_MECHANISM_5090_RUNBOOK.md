@@ -542,6 +542,14 @@ echo "V7_BENCHMARK_CHAIN_EXIT=$rc"
 
 必须看到 `V7_BENCHMARK_RECEIPT_PASS` 和 `V7_BENCHMARK_CHAIN_EXIT=0`。若 benchmark 中断，保留已完成的 `results/benchmark/v7_mechanism/runs/*.json`，不要换 GPU 或修改输入；只有同一实例、同一环境、同一固定 validation batch 才可继续执行同一命令。
 
+若这是从正式训练冻结提交 `b780b38322b491f849592d71814b7eb44de16948` 迁移到
+评估器恢复提交，导出器可能先输出
+`V7_VALIDATION_BATCH_COMPATIBILITY_REBOUND`。这只重绑定 validation batch 的
+`git_commit` 和 `freeze_manifest_sha256` 元数据；必须同时看到原始 batch 内容哈希
+仍为 `c71537580ee9f8d17f7d66d85027f73691f12a533fd87379bf268d28aa9f3869`，并保留
+`validation_batch_compatibility_recovery.json` 侧车。它不是训练结果，也不改变任何
+checkpoint 或 validation tensor。
+
 资源审计通过后，才允许 one-time final-test：
 
 ```bash
