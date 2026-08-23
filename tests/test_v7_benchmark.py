@@ -7,7 +7,8 @@ from typing import Any
 
 import pytest
 
-import talif_msresnet.benchmark_v7 as benchmark_v7
+from scripts.run_v7_benchmarks import _parameter_measurement
+from talif_msresnet import benchmark_v7
 from talif_msresnet.benchmark_v7 import (
     RESULT_ARTIFACT_CLASS,
     RESULT_SCHEMA,
@@ -26,7 +27,6 @@ from talif_msresnet.config_v7 import (
 )
 from talif_msresnet.utils import sha256_file, stable_hash
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_SOURCE = ROOT / "configs" / "protocol_v7_mechanism.yaml"
 COMMIT = "a" * 40
@@ -34,6 +34,12 @@ COMMIT = "a" * 40
 
 def _hash(token: str) -> str:
     return stable_hash({"fixture": token})
+
+
+def test_v7_parameter_measurement_adapts_canonical_model_report() -> None:
+    assert _parameter_measurement(
+        {"total_parameters": 123, "trainable_parameters": 117}
+    ) == {"total": 123, "trainable": 117}
 
 
 def _hardware() -> dict[str, str]:

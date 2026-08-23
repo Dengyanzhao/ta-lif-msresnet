@@ -194,6 +194,15 @@ def _measurement(
     }
 
 
+def _parameter_measurement(parameter_report: Mapping[str, Any]) -> dict[str, int]:
+    """Adapt the model API's canonical parameter names to the result schema."""
+
+    return {
+        "total": int(parameter_report["total_parameters"]),
+        "trainable": int(parameter_report["trainable_parameters"]),
+    }
+
+
 def _load_formal_audit(
     *,
     protocol: Mapping[str, Any],
@@ -520,10 +529,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             parameter_report = model.parameter_report()
             measurements = {
-                "parameters": {
-                    "total": int(parameter_report["total"]),
-                    "trainable": int(parameter_report["trainable"]),
-                },
+                "parameters": _parameter_measurement(parameter_report),
                 "batch_1": _measurement(result, 1, neuron_operation_mode=operation_mode),
                 "batch_128": _measurement(result, 128, neuron_operation_mode=operation_mode),
             }
